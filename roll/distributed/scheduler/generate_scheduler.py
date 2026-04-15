@@ -16,6 +16,7 @@ from datasets import Dataset
 from tqdm import tqdm
 from transformers import set_seed
 
+from roll.distributed.backend import get_backend
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.router import RouterManager
 from roll.distributed.scheduler.protocol import DataProto, pad_dataproto_to_divisor, unpad_dataproto
@@ -883,7 +884,8 @@ class RolloutContext:
             logger.debug(f"generate_and_reward: {self.prompt_id=} compute_rewards")
             output_count = req.batch.batch_size[0]
             req.non_tensor_batch["rollout_id"] = np.array([str(uuid.uuid4()) for _ in range(output_count)], dtype=object)
-            return await reward_worker.compute_rewards.remote(req)
+            backend = get_backend()
+            return await backend.invoke(reward_worker, "compute_rewards", (req,))
 
     async def abort_running_requests(self):
         """

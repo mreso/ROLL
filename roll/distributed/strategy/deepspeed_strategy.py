@@ -402,7 +402,7 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         logger.info(f"{self.model}")
         dist.barrier()
 
-    def op_compute_language_loss(self, logits: torch.Tensor, labels: torch.Tensor):
+    def op_compute_language_loss(self, logits: torch.Tensor, labels: torch.Tensor, batch_num_tokens: int = None):
         """
         Override for DeepSpeed strategy: compute language loss from logits.
 
@@ -415,17 +415,28 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         Args:
             logits: Model output logits [batch_size, seq_len, vocab_size]
             labels: Pre-shifted labels [batch_size, seq_len], already aligned with logits
+            batch_num_tokens: Number of non-padding tokens for loss normalization
 
         Returns:
             loss: Scalar loss tensor
             metrics: Dict
         """
-        # Labels already shifted by DataCollator, directly compute cross-entropy
-        loss = torch.nn.functional.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            labels.view(-1),
-            ignore_index=IGNORE_INDEX
-        )
+        if batch_num_tokens is not None:
+            # Use token-level loss normalization (matches base class behavior)
+            per_token_loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=IGNORE_INDEX,
+                reduction='none'
+            )
+            loss_mask = (labels != IGNORE_INDEX).float().view(-1)
+            loss = torch.sum(per_token_loss * loss_mask) / batch_num_tokens
+        else:
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=IGNORE_INDEX
+            )
         metrics = {f"{self.worker_config.name}/loss@sum": loss.detach().float().unsqueeze(0)}
         return loss, metrics
 
