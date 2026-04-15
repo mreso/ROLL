@@ -137,3 +137,13 @@ class Backend(ABC):
     def create_exception_monitor(self) -> ActorHandle:
         """Create an exception monitor actor."""
         ...
+
+    @abstractmethod
+    def get_actor(self, name: str, namespace: Optional[str] = None) -> ActorHandle:
+        """Look up a named actor by name and namespace."""
+        ...
+
+    @abstractmethod
+    def get_current_node(self) -> NodeInfo:
+        """Get current node information."""
+        ...

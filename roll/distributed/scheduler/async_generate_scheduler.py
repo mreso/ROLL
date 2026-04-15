@@ -12,7 +12,15 @@ from typing import Any, Dict, List, Optional, Set, Union
 
 from roll.distributed.backend import get_backend
 from roll.distributed.backend.types import RemoteRef
-import ray
+try:
+    import ray
+    ray_method = ray.method
+except ImportError:
+    ray = None
+    def ray_method(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
 import torch
 from datasets import Dataset
 from torch.nn.utils.rnn import pad_sequence
@@ -640,7 +648,7 @@ class AsyncDynamicSamplingScheduler:
         self.async_sending_thread = threading.Thread(target=self.sending_request, args=(data,))
         self.async_sending_thread.start()
 
-    @ray.method(concurrency_group="multi_thread")
+    @ray_method(concurrency_group="multi_thread")
     def report_response(self, data: DataProto):
         try:
             data.meta_info["request_id"] = data.meta_info["request_id"].split("_")[0]

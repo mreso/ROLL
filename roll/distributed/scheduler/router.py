@@ -12,7 +12,6 @@ from urllib.parse import quote
 
 from roll.distributed.backend import get_backend
 from roll.distributed.backend.types import ActorHandle as BackendActorHandle
-import ray
 
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.executor.worker import Worker
@@ -114,12 +113,12 @@ class RouterManager:
     def create_client_sync(cls, self) -> "RouterClient":
         if isinstance(self, BackendActorHandle):
             self = self._inner
-        if isinstance(self, ray.actor.ActorHandle):
-            meta = get_backend().get(self.router_meta.remote())
-            proxy_cls = RayProxy
-        elif isinstance(self, cls):
+        if isinstance(self, cls):
             meta = self.router_meta()
             proxy_cls = InprocProxy
+        elif hasattr(self, 'router_meta'):
+            meta = get_backend().get(self.router_meta.remote())
+            proxy_cls = RayProxy
         else:
             raise ValueError(f"self {self} is not a ray actor or RouterManager")
 
@@ -135,12 +134,12 @@ class RouterManager:
         """
         if isinstance(self, BackendActorHandle):
             self = self._inner
-        if isinstance(self, ray.actor.ActorHandle):
-            meta = await self.router_meta.remote()
-            proxy_cls = RayProxy
-        elif isinstance(self, cls):
+        if isinstance(self, cls):
             meta = self.router_meta()
             proxy_cls = InprocProxy
+        elif hasattr(self, 'router_meta'):
+            meta = await self.router_meta.remote()
+            proxy_cls = RayProxy
         else:
             raise ValueError(f"self {self} is not a ray actor or RouterManager")
 

@@ -1,6 +1,5 @@
-import ray
-
 from roll.configs.base_config import PPOConfig
+from roll.distributed.backend import get_backend
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.scheduler.protocol import DataProto
 from roll.utils.functionals import reduce_metrics_list
@@ -19,10 +18,13 @@ class ModelUpdateGroup:
         assert (max(train_devices) - min(train_devices)) == (len(train_devices) - 1), f"{train_devices=} must be continuous"
         assert (max(infer_devices) - min(infer_devices)) == (len(infer_devices) - 1), f"{infer_devices=} must be continuous"
 
-        ray.get(
+        backend = get_backend()
+        self.backend = backend
+        backend.get(
             [
-                train_worker.setup_model_update.remote(
-                    infer_cluster=self.tgt_cluster, model_update_name=self.model_update_name
+                backend.invoke(
+                    train_worker, "setup_model_update", (),
+                    {"infer_cluster": self.tgt_cluster, "model_update_name": self.model_update_name}
                 )
                 for train_worker in self.src_cluster.workers
             ]
@@ -32,9 +34,9 @@ class ModelUpdateGroup:
         if step % self.frequency != 0:
             return {}
 
-        dataprotos: list[DataProto] = ray.get(
+        dataprotos: list[DataProto] = self.backend.get(
             [
-                train_worker.start_model_update.remote(model_update_name=self.model_update_name)
+                self.backend.invoke(train_worker, "start_model_update", (), {"model_update_name": self.model_update_name})
                 for train_worker in self.src_cluster.workers
             ]
         )

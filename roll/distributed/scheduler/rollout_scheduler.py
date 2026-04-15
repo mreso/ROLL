@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-import ray
 from roll.distributed.backend import get_backend
 from tqdm import tqdm
 
@@ -565,7 +564,7 @@ class RolloutScheduler(RolloutMockMixin):
 
         backend = get_backend()
         from roll.distributed.backend.types import PlacementSpec
-        placement_spec = PlacementSpec(node_id=ray.get_runtime_context().get_node_id())
+        placement_spec = PlacementSpec(node_id=get_backend().current_node_id())
 
         self.env_output_queue = backend.create_actor(
             cls=GroupQueueManager,

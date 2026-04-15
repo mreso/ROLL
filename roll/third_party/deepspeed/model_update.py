@@ -1,5 +1,7 @@
-import ray
 import torch.distributed as dist
+
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef
 from deepspeed.runtime.zero import GatheredParameters
 from peft import get_peft_model_state_dict
 
@@ -55,6 +57,7 @@ class DeepSpeedWeightUpdater:
         self.model_update_infer_workers = infer_cluster.workers
         self._model_update_buffer_size = pipeline_config.model_update_buffer_size_mb * 1024 * 1024  # Convert MB to bytes
         self.is_lora = is_lora
+        self.backend = get_backend()
         self.infer_worker_config = infer_cluster.worker_config
         self.infer_cluster = infer_cluster
         self.is_colocated = is_actor_infer_overlapping_with_any_cluster(infer_cluster.worker_config, actor_train=worker_config)
@@ -127,13 +130,13 @@ class DeepSpeedWeightUpdater:
         master_address, master_port = get_node_ip(), collect_free_port()
 
         refs = [
-            infer_worker.setup_collective_group.remote(
-                master_address=master_address,
-                master_port=master_port,
-                group_name=self.model_update_group_name,
-                rank_offset=i * num_gpus_per_infer_worker + 1,
-                world_size=infer_device_num + 1,
-            )
+            self.backend.invoke(infer_worker, "setup_collective_group", (), {
+                "master_address": master_address,
+                "master_port": master_port,
+                "group_name": self.model_update_group_name,
+                "rank_offset": i * num_gpus_per_infer_worker + 1,
+                "world_size": infer_device_num + 1,
+            })
             for i, infer_worker in enumerate(self._broadcast_workers)
         ]
         collective.init_collective_group(
@@ -143,7 +146,7 @@ class DeepSpeedWeightUpdater:
             master_addr=master_address,
             master_port=master_port,
         )
-        ray.get(refs)
+        self.backend.get(refs)
 
         logger.info(f"Init weights update group {self.model_update_group_name}")
 
@@ -164,26 +167,26 @@ class DeepSpeedWeightUpdater:
                     serialized_tensors, infer_parallel_tensors, group_dst=0, group=self._infer_parallel_cpu_group
                 )
             if refs:
-                ray.get(refs)
+                self.backend.get(refs)
                 refs = []
             if co_infer_rank == 0 and self._co_infer_worker is not None:
-                refs.append(self._co_infer_worker.update_parameter_in_bucket.remote(infer_parallel_tensors))
+                refs.append(self.backend.invoke(self._co_infer_worker, "update_parameter_in_bucket", (infer_parallel_tensors,)))
             if self._broadcast_workers:
                 refs.extend(self._broadcast_to_infer_workers(named_weights))
         if refs:
-            ray.get(refs)
+            self.backend.get(refs)
         return {}
 
-    def _broadcast_to_infer_workers(self, named_weights) -> list[ray.ObjectRef]:
+    def _broadcast_to_infer_workers(self, named_weights) -> list[RemoteRef]:
         if not self._broadcast_workers:
             return []
         refs = [
-            worker.broadcast_parameter.remote(
-                group_name=self.model_update_group_name,
-                names=[n for n, _ in named_weights],
-                dtypes=[w.dtype for _, w in named_weights],
-                shapes=[w.shape for _, w in named_weights],
-            )
+            self.backend.invoke(worker, "broadcast_parameter", (), {
+                "group_name": self.model_update_group_name,
+                "names": [n for n, _ in named_weights],
+                "dtypes": [w.dtype for _, w in named_weights],
+                "shapes": [w.shape for _, w in named_weights],
+            })
             for worker in self._broadcast_workers
         ]
         handles = []
@@ -201,5 +204,5 @@ class DeepSpeedWeightUpdater:
             self.model, self.ds_config, buffer_size=self._model_update_buffer_size
         ):
             refs = self._broadcast_to_infer_workers(named_weights)
-            ray.get(refs)
+            self.backend.get(refs)
         return {}

@@ -52,7 +52,8 @@ class AgentNativeStepEnvManager(TrajEnvManager):
                 rollout: DataProto = self.create_placeholder_rollout(self.episode_id)
                 rollout.meta_info["drop_flag"] = True
 
-                ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
+                backend = get_backend()
+                backend.get(backend.invoke(self.output_queue, "put", args=(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id'])))
                 self.env.close()
                 if max_reset_retries > 3:
                     backoff_time = min(3600, 10 * max_reset_retries)
@@ -88,12 +89,14 @@ class AgentNativeStepEnvManager(TrajEnvManager):
                 traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
                 rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
                 rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
-                ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
+                backend = get_backend()
+                backend.get(backend.invoke(self.output_queue, "put", args=(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id'])))
 
                 rollout_cache = self.reset()
                 start_step = self.current_step
 
-        ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id']))
+        backend = get_backend()
+        backend.get(backend.invoke(self.output_queue, "put", args=(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id'])))
 
     def reset(self) -> Optional[RolloutCache]:
         self.log_stats = {"generate_time": [], "step_time": [], "current_step": [], "reset_time": 0.0, "response_length": [], "tokens_per_second": []}
@@ -102,10 +105,11 @@ class AgentNativeStepEnvManager(TrajEnvManager):
                                           group_id=self.env_config['group_id'],
                                           tag=self.env_config['tag'])
 
-        self.episode_id = ray.get(self.output_queue.get_episode_id.remote(
+        backend = get_backend()
+        self.episode_id = backend.get(backend.invoke(self.output_queue, "get_episode_id", args=(
             self.env_config['group_id'],
-            self.env_config['env_id']
-        ))
+            self.env_config['env_id'],
+        )))
         if self.episode_id is None:
             assert not self.running
             return None

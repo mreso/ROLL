@@ -240,12 +240,12 @@ def func_generator(cls, method_name, dispatch_fn, collect_fn, execute_fn):
             timeout = None
             if "roll_RPC_TIMEOUT" in os.environ:
                 timeout = int(os.environ.get("roll_RPC_TIMEOUT"))
-            # Use backend abstraction if available, otherwise fall back to ray.get
+            # Use backend abstraction for blocking get
             if hasattr(cls, 'backend'):
                 output = cls.backend.get(output, timeout=timeout)
             else:
-                import ray
-                output = ray.get(output, timeout=timeout)
+                from roll.distributed.backend import get_backend
+                output = get_backend().get(output, timeout=timeout)
         output = collect_fn(cls, output)
         return output
 

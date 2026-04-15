@@ -10,7 +10,6 @@ import numpy as np
 from functools import partial
 import uuid
 from roll.distributed.backend import get_backend
-import ray
 import tensordict
 from tensordict import TensorDict
 from roll.configs.worker_config import WorkerConfig
@@ -105,7 +104,7 @@ class LLMJudgeRewardWorker(Worker):
         self.chat_template_func = get_chat_template(template_name, self.reward_tokenizer)
 
         scheduler_name = f"RewardModelScheduler-{pipeline_config.reward_model.name}"
-        reward_scheduler = ray.get_actor(scheduler_name, namespace=RAY_NAMESPACE)
+        reward_scheduler = get_backend().get_actor(scheduler_name, namespace=RAY_NAMESPACE)
         self.reward_scheduler = RouterManager.create_client_sync(reward_scheduler)
         self.logger.info(f"{self.worker_name} initialized, connected to scheduler: {scheduler_name}")
 

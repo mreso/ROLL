@@ -7,7 +7,6 @@ import PIL
 import gem
 import numpy as np
 from roll.distributed.backend import get_backend
-import ray
 import torch
 from transformers import PreTrainedTokenizer, ProcessorMixin
 from codetiming import Timer
@@ -90,7 +89,7 @@ class VLTrajEnvManager(TrajEnvManager):
 
         # Try to get reward scheduler from Ray named actor
         if self.pipeline_config.reward:
-            self.reward_scheduler = ray.get_actor(
+            self.reward_scheduler = get_backend().get_actor(
                 name=f"RewardScheduler-{pipeline_config.reward.name}",
                 namespace=RAY_NAMESPACE
             )

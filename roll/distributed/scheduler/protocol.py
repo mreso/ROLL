@@ -26,22 +26,15 @@ logger = get_logger()
 
 def _get_objects(refs, timeout=None):
     """
-    Helper function to fetch objects using the appropriate backend.
-    Handles both RemoteRef (backend abstraction) and raw Ray ObjectRef.
+    Helper function to fetch objects using the backend abstraction.
+    The backend's get() method handles both RemoteRef and raw refs internally.
     """
     if not refs:
         return []
 
-    # Check if we're using backend abstraction
-    if hasattr(refs[0] if isinstance(refs, list) else refs, '_inner'):
-        # Using RemoteRef from backend abstraction
-        from roll.distributed.backend import get_backend
-        backend = get_backend()
-        return backend.get(refs, timeout=timeout)
-    else:
-        # Fallback to raw Ray for backwards compatibility
-        import ray
-        return ray.get(refs, timeout=timeout)
+    from roll.distributed.backend import get_backend
+    backend = get_backend()
+    return backend.get(refs, timeout=timeout)
 
 
 try:

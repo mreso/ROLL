@@ -5,9 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import datasets
 from roll.distributed.backend import get_backend
-from roll.distributed.backend.types import RemoteRef, PlacementSpec
-import ray
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from roll.distributed.backend.types import PlacementSpec
 import torch
 from codetiming import Timer
 
@@ -93,19 +91,19 @@ class RLVRRolloutPipeline(RLVRPipeline):
 
         val_pipeline_config = copy.deepcopy(self.pipeline_config)
         val_pipeline_config.is_use_additional_prompts = False
-        self.val_generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=ray.get_runtime_context().get_node_id(),
-                soft=False,
-            )
-        ).remote(
-            pipeline_config=val_pipeline_config,
-            actor_cluster=self.actor_infer,
-            reward_clusters=self.rewards,
-            dataset=self.val_dataset,
-            collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
-            collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
-            is_val=True,
+        backend = get_backend()
+        self.val_generate_scheduler = backend.create_actor(
+            cls=DynamicSamplingScheduler,
+            kwargs=dict(
+                pipeline_config=val_pipeline_config,
+                actor_cluster=self.actor_infer,
+                reward_clusters=self.rewards,
+                dataset=self.val_dataset,
+                collect_fn_cls=DataCollatorWithPaddingForPaddedKeys,
+                collect_fn_kwargs=dict(max_length=self.pipeline_config.prompt_length, padding="max_length"),
+                is_val=True,
+            ),
+            placement=PlacementSpec(node_id=backend.current_node_id()),
         )
 
         refs = []
@@ -117,7 +115,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
             refs.extend(cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
         get_backend().get(refs)
 
-        get_backend().get(self.val_generate_scheduler.initialize.remote())
+        backend.get(backend.invoke(self.val_generate_scheduler, "initialize"))
 
     @torch.no_grad()
     def run(self):
@@ -132,8 +130,9 @@ class RLVRRolloutPipeline(RLVRPipeline):
             self.actor_infer.load_states()
             for reward_cluster in self.rewards.values():
                 reward_cluster.load_states()
-            generate_output: DataProto = get_backend().get(
-                self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
+            backend = get_backend()
+            generate_output: DataProto = backend.get(
+                backend.invoke(self.val_generate_scheduler, "get_batch", kwargs=dict(data=batch, global_step=global_step, batch_size=len(self.val_dataset))),
                 timeout=self.pipeline_config.rpc_timeout,
             )
             for reward_cluster in self.rewards.values():
@@ -166,6 +165,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
 
         logger.info(f"pipeline step {global_step} finished")
 
-        get_backend().get(self.val_generate_scheduler.shutdown.remote())
+        backend = get_backend()
+        backend.get(backend.invoke(self.val_generate_scheduler, "shutdown"))
 
         logger.info("pipeline complete!")

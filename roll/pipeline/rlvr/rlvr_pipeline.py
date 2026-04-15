@@ -11,7 +11,7 @@ import datasets
 import numpy as np
 import torch
 from codetiming import Timer
-from ray.util.timer import _Timer
+from roll.utils.timer import _Timer
 
 from roll.distributed.backend import get_backend
 from roll.distributed.backend.types import RemoteRef, PlacementSpec

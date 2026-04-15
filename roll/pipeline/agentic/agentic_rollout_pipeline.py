@@ -5,8 +5,6 @@ from itertools import count
 from typing import Any
 
 from roll.distributed.backend import get_backend
-from roll.distributed.backend.types import RemoteRef, PlacementSpec
-import ray
 import torch
 from codetiming import Timer
 
@@ -46,18 +44,22 @@ class AgenticRolloutPipeline(BasePipeline):
         self.download_models(self.actor_infer)
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
-        self.rollout_scheduler = ray.remote(RolloutScheduler).remote(
-            config=self.pipeline_config,
-            env_manager_config=self.pipeline_config.train_env_manager,
-            resource_manager=self.resource_manager,
-            infer_cluster=self.actor_infer,
-            mode="train",
+        backend = get_backend()
+        self.rollout_scheduler = backend.create_actor(
+            cls=RolloutScheduler,
+            kwargs=dict(
+                config=self.pipeline_config,
+                env_manager_config=self.pipeline_config.train_env_manager,
+                resource_manager=self.resource_manager,
+                infer_cluster=self.actor_infer,
+                mode="train",
+            ),
         )
 
         if self.use_policy_model:
             self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
-        get_backend().get(self.rollout_scheduler.initialize.remote()) # must initialize after actor_infer
+        backend.get(backend.invoke(self.rollout_scheduler, "initialize"))  # must initialize after actor_infer
 
     @torch.no_grad()
     def run(self):
@@ -70,7 +72,8 @@ class AgenticRolloutPipeline(BasePipeline):
 
             with Timer(name="rollout", logger=None) as rollout_timer:
                 self.actor_infer.load_states()
-                batch = get_backend().get(self.rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
+                backend = get_backend()
+                batch = backend.get(backend.invoke(self.rollout_scheduler, "get_batch", args=(batch, self.pipeline_config.rollout_batch_size)))
                 if batch is None:
                     break
 
@@ -107,7 +110,7 @@ class AgenticRolloutPipeline(BasePipeline):
                 if int(os.environ.get("RAY_PROFILING", "0")):
                     timeline_dir = os.path.join(self.pipeline_config.profiler_output_dir, "timeline")
                     os.makedirs(timeline_dir, exist_ok=True)
-                    ray.timeline(
+                    get_backend().timeline(
                         filename=os.path.join(timeline_dir, f"timeline-step-{global_step}.json"),
                     )
 
@@ -140,5 +143,6 @@ class AgenticRolloutPipeline(BasePipeline):
 
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1
-        get_backend().get(self.rollout_scheduler.shutdown.remote())
+        backend = get_backend()
+        backend.get(backend.invoke(self.rollout_scheduler, "shutdown"))
         logger.info("pipeline complete!")

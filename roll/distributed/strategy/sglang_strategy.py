@@ -9,7 +9,6 @@ import random
 import setproctitle
 
 from roll.distributed.backend import get_backend
-import ray
 import grpc
 import httpx
 import torch
@@ -117,7 +116,7 @@ class SgLangStrategy(InferenceStrategy):
         )
 
         if nnodes > 1:
-            sglang_config['dist_init_addr'] = f'{ray.util.get_node_ip_address()}:{collect_free_port()}'
+            sglang_config['dist_init_addr'] = f'{get_backend().get_node_ip_address()}:{collect_free_port()}'
 
         logger.info(f"[sglang][sglang_config]: {sglang_config}")
 
@@ -136,7 +135,10 @@ class SgLangStrategy(InferenceStrategy):
                     sglang_pg_list.append(item['placement_group'])
                     node_index += 1
 
-            from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+            try:
+                from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+            except ImportError:
+                PlacementGroupSchedulingStrategy = None
             from roll.utils.constants import RAY_NAMESPACE
             for i in range(1, nnodes):
                 sglang_ray_option = {

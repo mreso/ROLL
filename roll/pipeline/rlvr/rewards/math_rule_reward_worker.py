@@ -31,11 +31,20 @@ class timeout:
         raise TimeoutError(self.error_message)
 
     def __enter__(self):
-        signal.signal(signal.SIGALRM, self.handle_timeout)
-        signal.alarm(self.seconds)
+        try:
+            signal.signal(signal.SIGALRM, self.handle_timeout)
+            signal.alarm(self.seconds)
+        except ValueError:
+            # signal.alarm() only works in the main thread.  In Monarch's
+            # async actor endpoints we run off the main thread, so fall back
+            # to no timeout (the math verification is fast enough in practice).
+            pass
 
     def __exit__(self, type, value, traceback):
-        signal.alarm(0)
+        try:
+            signal.alarm(0)
+        except ValueError:
+            pass
 
 def check_and_extract_within_boxed(response, boxed_start="\\boxed{", boxed_start_list=["\\boxed\{", "\\boxed{"]):
     if len(boxed_start_list) > 0:
@@ -159,7 +168,7 @@ def _hf_verify_math_sample(response, answer, result, prompt):
             parsed_answers = parse(cleaned_response, fallback_mode="no_fallback")
         else:
             parsed_answers = parse(f"${extracted_answer}$", fallback_mode="no_fallback")
-        
+
         # 如果解析结果为空，则认为提取失败
         if not parsed_answers:
             exect_answer = None
@@ -178,31 +187,49 @@ def _hf_verify_math_sample(response, answer, result, prompt):
             
     except Exception as e:
         # 捕获任何潜在的异常，确保进程不会崩溃
+        import logging as _logging
+        _logging.getLogger(__name__).error(f"_hf_verify_math_sample exception: {type(e).__name__}: {e}")
         result.append((False, "", ""))
 
 
+def _is_main_thread() -> bool:
+    """Check if we're running in the main thread (safe for multiprocessing)."""
+    import threading
+    return threading.current_thread() is threading.main_thread()
+
+
 def hf_verify_math_sample(answer_a, answer_b, prompt, timeout_sec=5.0):
-    with multiprocessing.Manager() as manager:
-        result = manager.list()
-        
-        p = multiprocessing.Process(
-            target=_hf_verify_math_sample,
-            args=(answer_a, answer_b, result, prompt)
-        )
-        
-        p.start()
-        try:
-            max_timeout = min(timeout_sec + 1, 10)
-            p.join(timeout=max_timeout)
-        except Exception as e:
-            pass
-        finally:
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=2)
+    if _is_main_thread():
+        # Safe to use multiprocessing (Ray actors, main process).
+        with multiprocessing.Manager() as manager:
+            result = manager.list()
+
+            p = multiprocessing.Process(
+                target=_hf_verify_math_sample,
+                args=(answer_a, answer_b, result, prompt)
+            )
+
+            p.start()
+            try:
+                max_timeout = min(timeout_sec + 1, 10)
+                p.join(timeout=max_timeout)
+            except Exception:
+                pass
+            finally:
                 if p.is_alive():
-                    p.kill()
-            p.join(timeout=2)
+                    p.terminate()
+                    p.join(timeout=2)
+                    if p.is_alive():
+                        p.kill()
+                p.join(timeout=2)
+            if not result:
+                return False, "", ""
+            return result[0]
+    else:
+        # Not main thread (Monarch async actor endpoint).
+        # Run verification directly in-process without forking.
+        result = []
+        _hf_verify_math_sample(answer_a, answer_b, result, prompt)
         if not result:
             return False, "", ""
         return result[0]
@@ -259,12 +286,35 @@ class MathRuleRewardWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE, clear_cache=False)
     def compute_rewards(self, data: DataProto):
+        # Monarch async actor endpoints run off the main thread, which
+        # breaks signal.alarm() used by math_verify and the timeout ctx.
+        # Patch signal for the duration of reward computation.
+        import threading
+        _signal_patched = False
+        if threading.current_thread() is not threading.main_thread():
+            self._orig_signal_signal = signal.signal
+            self._orig_signal_alarm = signal.alarm
+            self._orig_signal_getsignal = signal.getsignal
+            signal.signal = lambda *a, **k: signal.SIG_DFL
+            signal.alarm = lambda *a, **k: 0
+            signal.getsignal = lambda *a, **k: signal.SIG_DFL
+            _signal_patched = True
+
+        try:
+            return self._compute_rewards_impl(data)
+        finally:
+            if _signal_patched:
+                signal.signal = self._orig_signal_signal
+                signal.alarm = self._orig_signal_alarm
+                signal.getsignal = self._orig_signal_getsignal
+
+    def _compute_rewards_impl(self, data: DataProto):
         verify_answer = []
         repetition_penalty_rewards = []
         long_block_penalty_rewards = []
         response_length_rewards = []
         format_rewards = []
-        
+
         response_text_list = self.tokenizer.batch_decode(data.batch["responses"], skip_special_tokens=False)
         prompt_text_list = self.tokenizer.batch_decode(data.batch["prompts"], skip_special_tokens=False)
         for response, answer, prompt in zip(response_text_list, data.non_tensor_batch["ground_truth"], prompt_text_list):

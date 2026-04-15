@@ -10,7 +10,10 @@ from typing import Optional, Dict, List, Tuple
 import datasets
 from roll.distributed.backend import get_backend
 import numpy as np
-import ray
+try:
+    import ray
+except ImportError:
+    ray = None
 from dacite import from_dict
 from gem import Env
 from transformers.image_utils import load_image
@@ -113,6 +116,11 @@ def encode_dataset(dataset, num_proc, encode_function, new_fingerprint=None):
     return dataset
 
 
+# NOTE: DeepEyesDataset is a Ray remote actor that extends GlobalDataset's Ray actor class.
+# This is deeply Ray-specific (uses @ray.remote at class definition time and inherits from
+# __ray_actor_class__). It cannot be abstracted without a full rewrite. When Ray is not
+# available, this module will fail to import, which is acceptable since the DeepEyes
+# environment is only used in agentic pipelines that require Ray.
 @ray.remote
 class DeepEyesDataset(GlobalDataset.__ray_actor_class__):
     def __init__(

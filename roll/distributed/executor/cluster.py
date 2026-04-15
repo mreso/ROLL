@@ -274,3 +274,40 @@ class Cluster:
                 return result
 
         return [self.backend.invoke(worker, method_name, args, kwargs) for worker in self.workers]
+
+    def __getstate__(self):
+        """Allow pickling for cross-process transfer (e.g., Monarch backend).
+
+        Only serialize the data needed by remote consumers (workers that
+        receive the Cluster for model_update coordination): the worker
+        list, config, and cluster metadata.
+        """
+        return {
+            "workers": self.workers,
+            "worker_config": self.worker_config,
+            "cluster_name": self.cluster_name,
+            "world_size": self.world_size,
+            "master_addr": getattr(self, "master_addr", None),
+            "master_port": getattr(self, "master_port", None),
+        }
+
+    def __setstate__(self, state):
+        """Reconstruct a lightweight Cluster proxy on the receiving side."""
+        self.workers = state["workers"]
+        self.worker_config = state["worker_config"]
+        self.cluster_name = state["cluster_name"]
+        self.world_size = state["world_size"]
+        self.master_addr = state.get("master_addr")
+        self.master_port = state.get("master_port")
+        # Reconstruct backend from singleton
+        from roll.distributed.backend import get_backend
+        self.backend = get_backend()
+        # Rebuild lookup dicts
+        self.rank2worker = {k: self.workers[k] for k in range(len(self.workers))}
+        self.worker2rank = {}
+        for k in range(len(self.workers)):
+            self.worker2rank[self.workers[k]] = k
+        # These are not needed on the receiving side
+        self.resource_manager = None
+        self.placement_groups = []
+        self.worker2nodes = {}

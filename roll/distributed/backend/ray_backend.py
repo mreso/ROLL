@@ -80,6 +80,9 @@ class RayBackend(Backend):
         except Exception:
             return True
 
+    def get_actor(self, name: str, namespace: Optional[str] = None) -> ActorHandle:
+        return ActorHandle(ray.get_actor(name, namespace=namespace))
+
     def get_current_node(self) -> NodeInfo:
         """Get current node information."""
         return NodeInfo(
