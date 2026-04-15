@@ -5,8 +5,9 @@ from typing import Optional
 
 import gem
 import numpy as np
-import ray
 import torch
+
+from roll.distributed.backend import get_backend
 from codetiming import Timer
 from omegaconf import DictConfig
 from tensordict import TensorDict
@@ -130,19 +131,19 @@ class TrajEnvManager(BaseEnvManager):
                 traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
                 rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
                 rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
-                ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
+                get_backend().get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
 
                 rollout_cache = self.reset()
                 start_step = self.current_step
 
-        ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id']))
+        get_backend().get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id']))
 
     def reset(self) -> RolloutCache:
         self.rollout_cache = RolloutCache(env_id=self.env_config['env_id'],
                                           group_id=self.env_config['group_id'],
                                           tag=self.env_config['tag'])
 
-        self.episode_id = ray.get(self.output_queue.get_episode_id.remote(
+        self.episode_id = get_backend().get(self.output_queue.get_episode_id.remote(
             self.env_config['group_id'],
             self.env_config['env_id']
         ))

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import PIL
 import gem
 import numpy as np
+from roll.distributed.backend import get_backend
 import ray
 import torch
 from transformers import PreTrainedTokenizer, ProcessorMixin
@@ -201,13 +202,13 @@ class VLTrajEnvManager(TrajEnvManager):
                 traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
                 rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
                 rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
-                ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
+                get_backend().get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, rollout, self.env_config['env_id']))
 
                 rollout_cache = self.reset()
                 start_step = self.current_step
                 self.stop_reason = EpisodeStopReason.FINISH
 
-        ray.get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id']))
+        get_backend().get(self.output_queue.put.remote(self.env_config['group_id'], self.episode_id, start_step, None, self.env_config['env_id']))
 
     def step(self, llm_output: DataProto):
         # Similar to agent_native_env_manager.py:133-157

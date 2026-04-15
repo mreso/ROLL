@@ -4,6 +4,8 @@ import time
 from itertools import count
 from typing import Any
 
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 import ray
 import torch
 from codetiming import Timer
@@ -55,7 +57,7 @@ class AgenticRolloutPipeline(BasePipeline):
         if self.use_policy_model:
             self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
 
-        ray.get(self.rollout_scheduler.initialize.remote()) # must initialize after actor_infer
+        get_backend().get(self.rollout_scheduler.initialize.remote()) # must initialize after actor_infer
 
     @torch.no_grad()
     def run(self):
@@ -68,7 +70,7 @@ class AgenticRolloutPipeline(BasePipeline):
 
             with Timer(name="rollout", logger=None) as rollout_timer:
                 self.actor_infer.load_states()
-                batch = ray.get(self.rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
+                batch = get_backend().get(self.rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
                 if batch is None:
                     break
 
@@ -138,5 +140,5 @@ class AgenticRolloutPipeline(BasePipeline):
 
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1
-        ray.get(self.rollout_scheduler.shutdown.remote())
+        get_backend().get(self.rollout_scheduler.shutdown.remote())
         logger.info("pipeline complete!")

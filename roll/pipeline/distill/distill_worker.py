@@ -2,7 +2,7 @@ import os
 from typing import Union, Optional, Dict
 from tensordict import TensorDict
 
-import ray
+from roll.distributed.backend import get_backend
 import torch
 import torch.distributed as dist
 from codetiming import Timer
@@ -539,7 +539,7 @@ class TeacherWorker(Worker):
                     tensor_shape=logits.shape, tensor_dtype=logits.dtype,
                 )
                 refs.append(ref)
-            ray.get(refs)
+            get_backend().get(refs)
             self.logger.info("[Teacher][P2P] all sends completed")
 
         # ---- Then Broadcast ----
@@ -560,7 +560,7 @@ class TeacherWorker(Worker):
                         tensor_shape=logits.shape, tensor_dtype=logits.dtype,
                     )
                     refs.append(ref)
-                ray.get(refs)
+                get_backend().get(refs)
                 self.logger.info("[Teacher][Broadcast][Ray] all sends completed")
             else:
                 refs = []
@@ -580,7 +580,7 @@ class TeacherWorker(Worker):
                     tensor=logits, src_rank=0, group_name=broadcast_comm_plan_args['group_name']
                 )
                 self.logger.info("[Teacher][Broadcast][NCCL] broadcast() done")
-                ray.get(refs)
+                get_backend().get(refs)
                 self.logger.info("[Teacher][Broadcast][NCCL] all sends completed")
 
 

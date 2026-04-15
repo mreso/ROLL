@@ -8,7 +8,7 @@ from typing import Optional, Union, Iterator
 import json
 import re
 
-import ray
+from roll.distributed.backend import get_backend
 import torch
 from math_verify import parse, verify
 from codetiming import Timer

@@ -6,7 +6,7 @@ import re
 import inspect
 import os
 
-import ray
+from roll.distributed.backend import get_backend
 import torch
 from codetiming import Timer
 from tqdm import tqdm

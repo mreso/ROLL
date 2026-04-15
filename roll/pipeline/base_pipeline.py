@@ -5,11 +5,10 @@ from collections import defaultdict
 from concurrent import futures
 from typing import Any, Dict, List
 
-import ray
-from ray.util.placement_group import PlacementGroup
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import set_seed
 
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import PlacementSpec
 from roll.distributed.executor.cluster import Cluster
 from roll.distributed.executor.model_update_group import ModelUpdateGroup
 from roll.distributed.scheduler.protocol import DataProto
@@ -155,7 +154,8 @@ class BasePipeline:
                         logger.warning(f"Failed to delete checkpoint {ckpt_dir}: {e}")
 
     def download_models(self, *clusters: Cluster):
-        node2pg: Dict[str, PlacementGroup] = {}
+        backend = get_backend()
+        node2pg: Dict[str, Any] = {}
         node2model_names: Dict[str, set[str]] = defaultdict(set)
         for cluster in clusters:
             assert cluster.placement_groups is not None
@@ -171,17 +171,29 @@ class BasePipeline:
                             node2model_names[node_rank].add(cluster.worker_config.model_args.model_name_or_path)
                         if self.pipeline_config.resume_from_checkpoint:
                             node2model_names[node_rank].add(self.pipeline_config.resume_from_checkpoint)
-        ray.get(
-            [
-                download_models.options(
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=node2pg[node_rank])
-                ).remote(model_name_or_paths=model_names)
-                for node_rank, model_names in node2model_names.items()
-            ]
-        )
 
-@ray.remote
-def download_models(model_name_or_paths: set[str]):
-    with futures.ThreadPoolExecutor(max_workers=5) as thread_executor:
-        futures.wait([thread_executor.submit(download_model, model_name_or_path)
-                      for model_name_or_path in model_name_or_paths])
+        # Create download actors using backend abstraction
+        download_refs = []
+        for node_rank, model_names in node2model_names.items():
+            placement = PlacementSpec(placement_group=node2pg[node_rank])
+            download_actor = backend.create_actor(
+                cls=ModelDownloader,
+                args=(model_names,),
+                placement=placement
+            )
+            download_ref = backend.invoke(download_actor, "download")
+            download_refs.append(download_ref)
+
+        backend.get(download_refs)
+
+class ModelDownloader:
+    """Actor class for downloading models in parallel."""
+
+    def __init__(self, model_name_or_paths: set[str]):
+        self.model_name_or_paths = model_name_or_paths
+
+    def download(self):
+        """Download all assigned models in parallel."""
+        with futures.ThreadPoolExecutor(max_workers=5) as thread_executor:
+            futures.wait([thread_executor.submit(download_model, model_name_or_path)
+                          for model_name_or_path in self.model_name_or_paths])

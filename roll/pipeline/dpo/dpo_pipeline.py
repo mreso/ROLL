@@ -5,10 +5,10 @@ import time
 from typing import Any, Dict, List
 
 import datasets
-import ray
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 import torch
 from codetiming import Timer
-from ray.util.timer import _Timer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -146,10 +146,10 @@ class DPOPipeline(BasePipeline):
             worker_config=self.pipeline_config.reference,
         )
 
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=False))
 
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
 
         dp_size = self.actor_train.dp_size

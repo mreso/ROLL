@@ -8,7 +8,7 @@ from gem import Env
 from gem.envs.math_env import MathEnv as GEMMathEnv
 from gem.utils.constants import TERMINAL_STATE
 from gem.utils.parsing import extract_last_boxed_answer
-import ray
+from roll.distributed.backend import get_backend
 
 from roll.datasets.global_dataset import GlobalDataset, GlobalDatasetManager
 from roll.utils.constants import RAY_NAMESPACE
@@ -44,7 +44,7 @@ class MathEnv(GEMMathEnv):
         self.dataset_manager = GlobalDatasetManager.options(name=f"{self.mode}_dataset_manager",
                                                             get_if_exists=True,
                                                             namespace=RAY_NAMESPACE).remote()
-        ray.get(self.dataset_manager.register.remote(dataset_name=dataset_name, dataset_ref=self.dataset))
+        get_backend().get(self.dataset_manager.register.remote(dataset_name=dataset_name, dataset_ref=self.dataset))
         self.idx = 0
         self.epoch = 0
         # Process pool is used to enable the timeout mechanism for answer grading in a potential distributed training setup
@@ -53,7 +53,7 @@ class MathEnv(GEMMathEnv):
     def reset(self, seed: Optional[None] = None) -> Tuple[str, dict[str, Any]]:
         """Sample a question from the dataset."""
         Env.reset(self, seed)
-        data: Optional[Dict] = ray.get(self.dataset.get_data_item.remote(seed=seed))
+        data: Optional[Dict] = get_backend().get(self.dataset.get_data_item.remote(seed=seed))
         if data is None:
             return None, None
         self.first_obs = data[self.question_key]

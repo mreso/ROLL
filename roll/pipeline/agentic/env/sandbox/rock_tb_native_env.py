@@ -1,7 +1,7 @@
 import itertools
 from typing import Any, Dict, List, Optional, SupportsFloat, Tuple, Union
 
-import ray
+from roll.distributed.backend import get_backend
 from gem import Env
 from omegaconf import OmegaConf
 
@@ -161,7 +161,7 @@ class RockTBNativeEnv(Env):
         idx_range = self.val_idx_range if self.mode == "val" else self.train_idx_range
         idx_list = self._parse_idx_range(idx_range)
 
-        ray.get(
+        get_backend().get(
             self.dataset.filter.remote(
                 filter_name="filter_idx_range", function=lambda x: int(x[self.id_key]) in idx_list
             )
@@ -170,7 +170,7 @@ class RockTBNativeEnv(Env):
         self.dataset_manager = GlobalDatasetManager.options(
             name=f"{self.mode}_dataset_manager", get_if_exists=True, namespace=RAY_NAMESPACE
         ).remote()
-        ray.get(self.dataset_manager.register.remote(dataset_name=dataset_name, dataset_ref=self.dataset))
+        get_backend().get(self.dataset_manager.register.remote(dataset_name=dataset_name, dataset_ref=self.dataset))
 
 
     def _parse_idx_range(self, idx_range: Union[List[int], str]) -> List[int]:
@@ -220,7 +220,7 @@ class RockTBNativeEnv(Env):
         super().reset(seed)
         self.clean_record()
 
-        data_line: Optional[Dict] = ray.get(self.dataset.get_data_item.remote(seed=seed))
+        data_line: Optional[Dict] = get_backend().get(self.dataset.get_data_item.remote(seed=seed))
         if data_line is None:
             return None, {}
 

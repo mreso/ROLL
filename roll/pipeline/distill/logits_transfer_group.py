@@ -1,7 +1,7 @@
 import json
 from collections import defaultdict
 from typing import Any
-import ray
+from roll.distributed.backend import get_backend
 import torch
 from codetiming import Timer
 
@@ -42,7 +42,7 @@ class LogitsTransferGroup:
         self.backend = backend
 
         # get tensor list from src cluster
-        self.tensor_name_list_for_transfer = ray.get(src_cluster.workers[0].get_tensor_name_list_for_transfer.remote())
+        self.tensor_name_list_for_transfer = get_backend().get(get_backend().invoke(src_cluster.workers[0], "get_tensor_name_list_for_transfer"))
 
         self.broadcast_comm_pan = defaultdict(lambda: defaultdict(list))
         self.p2p_comm_plan = defaultdict(lambda: defaultdict(list))
@@ -269,8 +269,8 @@ class LogitsTransferGroup:
 
                 # group master worker（teacher src_rank worker）
                 group_master_worker = self.src_cluster.rank2worker[src_rank]
-                master_addr = ray.get(group_master_worker.get_node_ip.remote())
-                master_port = ray.get(group_master_worker.get_free_port.remote())
+                master_addr = get_backend().get(get_backend().invoke(group_master_worker, "get_node_ip"))
+                master_port = get_backend().get(get_backend().invoke(group_master_worker, "get_free_port"))
 
                 comm_plan_args = {
                     "group_name": group_name,
@@ -290,7 +290,8 @@ class LogitsTransferGroup:
 
                 # Teacher master worker setup group
                 if self.backend != "ray":
-                    ref = group_master_worker.setup_collective_group.remote(
+                    ref = get_backend().invoke(
+                        group_master_worker, "setup_collective_group",
                         model_update_name=self.model_update_name,
                         comm_plan={src_rank: comm_plan_args},
                         mode="sender"
@@ -303,14 +304,15 @@ class LogitsTransferGroup:
             if self.backend != "ray":
                 # Student workers setup group
                 for tgt_worker in self.tgt_cluster.workers:
-                    ref = tgt_worker.setup_collective_group.remote(
+                    ref = get_backend().invoke(
+                        tgt_worker, "setup_collective_group",
                         model_update_name=self.model_update_name,
                         comm_plan=self.phases_dict[phase_id],
                         mode="receiver"
                     )
                     refs.append(ref)
 
-            ray.get(refs)
+            get_backend().get(refs)
 
     def apply_offset_by_dp(self, dp: DataProto) -> DataProto:
         """
@@ -372,7 +374,8 @@ class LogitsTransferGroup:
                         self.tgt_cluster.rank2worker[entry['rank']]
                         for entry in broadcast_tgt_entry_list
                     ]
-                    ref = src_worker.logits_transfer.remote(
+                    ref = get_backend().invoke(
+                        src_worker, "logits_transfer",
                         tensor_name_for_transfer=tensor_name_for_transfer,
                         model_update_name=self.model_update_name,
                         broadcast_comm_plan_args=broadcast_comm_plan_args,
@@ -383,7 +386,7 @@ class LogitsTransferGroup:
                         backend=self.backend
                     )
                     refs.append(ref)
-                ray.get(refs)
+                get_backend().get(refs)
 
             # remaining p2p
             refs = []
@@ -392,7 +395,8 @@ class LogitsTransferGroup:
                     continue
                 src_worker = self.src_cluster.rank2worker[src_rank]
                 p2p_tgt_workers = [self.tgt_cluster.rank2worker[tgt_entry['rank']] for tgt_entry in p2p_tgt_entry_list]
-                ref = src_worker.logits_transfer.remote(
+                ref = get_backend().invoke(
+                    src_worker, "logits_transfer",
                     tensor_name_for_transfer=tensor_name_for_transfer,
                     model_update_name=self.model_update_name,
                     broadcast_comm_plan_args=None,
@@ -401,7 +405,7 @@ class LogitsTransferGroup:
                     backend=self.backend
                 )
                 refs.append(ref)
-            ray.get(refs)
+            get_backend().get(refs)
 
         print("\n[Logits Transfer Done]\n")
 
@@ -410,16 +414,16 @@ class LogitsTransferGroup:
         with Timer("student_internal_broadcast") as student_internal_broadcast_timer:
             refs = []
             for tgt_worker in self.tgt_cluster.workers:
-                ref = tgt_worker.broadcast_logits.remote(tensor_name_for_transfer=tensor_name_for_transfer, tp=True, cp=False)
+                ref = get_backend().invoke(tgt_worker, "broadcast_logits", tensor_name_for_transfer=tensor_name_for_transfer, tp=True, cp=False)
                 refs.append(ref)
-            ray.get(refs)
+            get_backend().get(refs)
 
             refs = []
             for tgt_worker in self.tgt_cluster.workers:
-                ref = tgt_worker.broadcast_logits.remote(tensor_name_for_transfer=tensor_name_for_transfer, tp=False,
+                ref = get_backend().invoke(tgt_worker, "broadcast_logits", tensor_name_for_transfer=tensor_name_for_transfer, tp=False,
                                                          cp=True)
                 refs.append(ref)
-            ray.get(refs)
+            get_backend().get(refs)
 
         print("\n[Logits Broadcast Done]\n")
 

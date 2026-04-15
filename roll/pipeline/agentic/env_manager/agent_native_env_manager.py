@@ -5,8 +5,9 @@ from datetime import datetime
 from typing import List, Union, Dict, Optional
 
 import numpy as np
-import ray
 import torch
+
+from roll.distributed.backend import get_backend
 from codetiming import Timer
 from tensordict import TensorDict
 

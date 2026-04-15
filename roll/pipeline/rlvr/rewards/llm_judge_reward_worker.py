@@ -9,6 +9,7 @@ import traceback
 import numpy as np
 from functools import partial
 import uuid
+from roll.distributed.backend import get_backend
 import ray
 import tensordict
 from tensordict import TensorDict
@@ -82,9 +83,11 @@ class LLMJudgeRewardWorker(Worker):
     def _initialize_inference_mode(self):
         async_strategy = self.worker_config.strategy_args.strategy_name in ["vllm", "sglang"]
         if self.worker_config.strategy_args.strategy_name == "sglang":  # not weight sync, need backup weights
-            self.worker_config.strategy_args.strategy_config["enable_weights_cpu_backup"] = True
+            if self.worker_config.strategy_args.strategy_config is not None:
+                self.worker_config.strategy_args.strategy_config["enable_weights_cpu_backup"] = True
         if self.worker_config.strategy_args.strategy_name == "vllm":
-            self.worker_config.strategy_args.strategy_config["sleep_level"] = 1
+            if self.worker_config.strategy_args.strategy_config is not None:
+                self.worker_config.strategy_args.strategy_config["sleep_level"] = 1
         self.strategy = create_strategy(worker=self, sync_wrapper=async_strategy)
         self.strategy.initialize(model_provider=default_reward_model_provider)
         self.tokenizer = self.strategy.tokenizer

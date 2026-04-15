@@ -13,7 +13,7 @@ import uuid
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import aiohttp
-import ray
+from roll.distributed.backend import get_backend
 import torch
 
 from roll.configs.worker_config import WorkerConfig

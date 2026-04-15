@@ -2,7 +2,8 @@ from typing import Any
 
 import datasets
 import numpy as np
-import ray
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 import torch
 from tqdm import tqdm
 from codetiming import Timer
@@ -139,7 +140,7 @@ class SFTPipeline(BasePipeline):
             resource_manager=self.resource_manager,
             worker_config=self.pipeline_config.sft_train
         )
-        ray.get(self.sft_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
+        get_backend().get(self.sft_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
 
         dp_size = self.sft_train.dp_size
         ga_steps = self.pipeline_config.sft_train.training_args.gradient_accumulation_steps

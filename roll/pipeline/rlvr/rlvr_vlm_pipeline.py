@@ -9,12 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import datasets
 import numpy as np
 import PIL.Image as Image
-import ray
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 import torch
 from codetiming import Timer
 from datasets import load_from_disk
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from ray.util.timer import _Timer
 from transformers import AutoConfig, ProcessorMixin
 from transformers.image_utils import load_images
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
@@ -316,31 +315,34 @@ class RLVRVLMPipeline(BasePipeline):
             else:
                 domain_batch_size = int(domain_ratios[domain] * self.pipeline_config.rollout_batch_size)
             accumulated += domain_batch_size
-            generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(), soft=False
-                )
-            ).remote(
-                pipeline_config=self.pipeline_config,
-                actor_cluster=self.actor_infer,
-                reward_clusters={domain: self.rewards[domain]},
-                dataset=self.domain_datasets[domain],
-                collect_fn_cls=DataCollatorWithPaddingForMM,
-                collect_fn_kwargs=dict(
-                    # tokenizer passed by DynamicSamplingScheduler.set_scheduler
-                    # tokenizer=self.tokenizer,
-                    extra_unpadded_keys=["domain", "reward_model"],
-                    extra_data_provider=get_extra_data_provider(
-                        self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
+            backend = get_backend()
+            node_info = backend.get_current_node()
+            placement_spec = PlacementSpec(node_id=node_info.node_id)
+            generate_scheduler = backend.create_actor(
+                cls=DynamicSamplingScheduler,
+                placement=placement_spec,
+                args=(
+                    self.pipeline_config,
+                    self.actor_infer,
+                    {domain: self.rewards[domain]},
+                    self.domain_datasets[domain],
+                    DataCollatorWithPaddingForMM,
+                    dict(
+                        # tokenizer passed by DynamicSamplingScheduler.set_scheduler
+                        # tokenizer=self.tokenizer,
+                        extra_unpadded_keys=["domain", "reward_model"],
+                        extra_data_provider=get_extra_data_provider(
+                            self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
+                        ),
+                        prompt_key="prompt",
+                        answer_key="ground_truth",
+                        image_key="images",
+                        image_flag_key="image_flag",
+                        max_length=self.pipeline_config.prompt_length,
+                        padding="max_length",
                     ),
-                    prompt_key="prompt",
-                    answer_key="ground_truth",
-                    image_key="images",
-                    image_flag_key="image_flag",
-                    max_length=self.pipeline_config.prompt_length,
-                    padding="max_length",
-                ),
-                state=self.state.kv.get(f"scheduler_state_{domain}", None),
+                    self.state.kv.get(f"scheduler_state_{domain}", None),
+                )
             )
             self.generate_schedulers[domain] = generate_scheduler
             self.domain_batch_size[domain] = domain_batch_size
@@ -353,54 +355,57 @@ class RLVRVLMPipeline(BasePipeline):
         if self.val_dataset:
             val_pipeline_config = copy.deepcopy(self.pipeline_config)
             val_pipeline_config.is_use_additional_prompts = False
-            self.val_generate_scheduler = ray.remote(DynamicSamplingScheduler).options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(), soft=False
-                )
-            ).remote(
-                pipeline_config=val_pipeline_config,
-                actor_cluster=self.actor_infer,
-                reward_clusters=self.rewards,
-                dataset=self.val_dataset,
-                collect_fn_cls=DataCollatorWithPaddingForMM,
-                collect_fn_kwargs=dict(
-                    # tokenizer passed by DynamicSamplingScheduler.set_scheduler
-                    # tokenizer=self.tokenizer,
-                    # val metrics are grouped by tag rather than domain
-                    extra_unpadded_keys=["domain", "reward_model", "tag"],
-                    extra_data_provider=get_extra_data_provider(
-                        self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
+            backend = get_backend()
+            node_info = backend.get_current_node()
+            placement_spec = PlacementSpec(node_id=node_info.node_id)
+            self.val_generate_scheduler = backend.create_actor(
+                cls=DynamicSamplingScheduler,
+                placement=placement_spec,
+                args=(
+                    val_pipeline_config,
+                    self.actor_infer,
+                    self.rewards,
+                    self.val_dataset,
+                    DataCollatorWithPaddingForMM,
+                    dict(
+                        # tokenizer passed by DynamicSamplingScheduler.set_scheduler
+                        # tokenizer=self.tokenizer,
+                        # val metrics are grouped by tag rather than domain
+                        extra_unpadded_keys=["domain", "reward_model", "tag"],
+                        extra_data_provider=get_extra_data_provider(
+                            self.pipeline_config.actor_train.model_args.model_name_or_path, processor=self.processor
+                        ),
+                        prompt_key="prompt",
+                        answer_key="ground_truth",
+                        image_key="images",
+                        image_flag_key="image_flag",
+                        max_length=self.pipeline_config.prompt_length,
+                        padding="max_length",
                     ),
-                    prompt_key="prompt",
-                    answer_key="ground_truth",
-                    image_key="images",
-                    image_flag_key="image_flag",
-                    max_length=self.pipeline_config.prompt_length,
-                    padding="max_length",
                 ),
-                is_val=True,
+                kwargs=dict(is_val=True)
             )
 
         refs = []
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
         if self.pipeline_config.enable_reference:
             refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
         refs = []
         for key, cluster in self.rewards.items():
             refs.extend(cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
         if self.pipeline_config.adv_estimator == "gae":
             refs.extend(self.critic.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
-        ray.get([scheduler.initialize.remote() for scheduler in self.generate_schedulers.values()])
+        get_backend().get([get_backend().invoke(scheduler, "initialize") for scheduler in self.generate_schedulers.values()])
         if self.val_dataset:
-            ray.get(self.val_generate_scheduler.initialize.remote())
+            get_backend().get(get_backend().invoke(self.val_generate_scheduler, "initialize"))
 
         self.set_model_update_pair(
             src_cluster=self.actor_train,
@@ -471,7 +476,7 @@ class RLVRVLMPipeline(BasePipeline):
 
                 with Timer(name="step_stop_server", logger=None) as step_stop_server_timer:
                     if self.pipeline_config.async_pipeline:
-                        ray.get([scheduler.pause_sampling.remote() for scheduler in self.generate_schedulers.values()])
+                        get_backend().get([get_backend().invoke(scheduler, "pause_sampling") for scheduler in self.generate_schedulers.values()])
                         self.actor_infer.offload_states(include=OffloadStateType.other_params)
                 metrics_mgr.add_metric("time/step_stop_server", step_stop_server_timer.last)
 
@@ -500,11 +505,12 @@ class RLVRVLMPipeline(BasePipeline):
                     domain_batches = {}
                     scheduler_refs = {}
                     for domain, scheduler in self.generate_schedulers.items():
-                        scheduler_refs[domain] = scheduler.get_batch.remote(
+                        scheduler_refs[domain] = get_backend().invoke(
+                            scheduler, "get_batch",
                             data=batch, global_step=global_step, batch_size=self.domain_batch_size[domain]
                         )
                     for domain, scheduler_ref in scheduler_refs.items():
-                        domain_batch: DataProto = ray.get(scheduler_ref, timeout=self.pipeline_config.rpc_timeout)
+                        domain_batch: DataProto = get_backend().get(scheduler_ref, timeout=self.pipeline_config.rpc_timeout)
                         metrics_mgr.add_domain_metrics(
                             domain, reduce_metrics(domain_batch.meta_info.pop("metrics", {}))
                         )
@@ -516,7 +522,7 @@ class RLVRVLMPipeline(BasePipeline):
                     generate_output.meta_info.pop("is_offload_states", None)
 
                     if not self.pipeline_config.async_pipeline:
-                        ray.get([scheduler.pause_sampling.remote() for scheduler in self.generate_schedulers.values()])
+                        get_backend().get([get_backend().invoke(scheduler, "pause_sampling") for scheduler in self.generate_schedulers.values()])
                         for reward_cluster in self.rewards.values():
                             reward_cluster.offload_states()
                         self.actor_infer.offload_states()
@@ -539,10 +545,10 @@ class RLVRVLMPipeline(BasePipeline):
                 with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
                     batch.meta_info["is_offload_states"] = False
                     if self.pipeline_config.adv_estimator == "gae":
-                        values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
+                        values_refs: List[RemoteRef] = self.critic.compute_values(batch, blocking=False)
 
                     if self.pipeline_config.enable_old_logprobs_recompute:
-                        old_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
+                        old_log_probs_refs: List[RemoteRef] = self.actor_train.compute_log_probs(batch, blocking=False)
                         old_log_probs = DataProto.materialize_concat(data_refs=old_log_probs_refs)
                         agg_entropy = agg_loss(
                             loss_mat=old_log_probs.batch["entropy"],
@@ -623,7 +629,7 @@ class RLVRVLMPipeline(BasePipeline):
                     self.state.step = global_step
                     self.state.log_history.append(metrics)
                     for domain, scheduler in self.generate_schedulers.items():
-                        self.state.kv[f"scheduler_state_{domain}"] = ray.get(scheduler.get_scheduler_state.remote())
+                        self.state.kv[f"scheduler_state_{domain}"] = get_backend().get(get_backend().invoke(scheduler, "get_scheduler_state"))
                     self.do_checkpoint(global_step=global_step)
                     self.tracker.log(values=metrics, step=global_step)
                     continue
@@ -649,7 +655,7 @@ class RLVRVLMPipeline(BasePipeline):
 
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     if self.pipeline_config.adv_estimator == "gae":
-                        critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
+                        critic_train_metrics_refs: List[RemoteRef] = self.critic.train_step(batch, blocking=False)
 
                     with actor_train_timer:
                         # implement critic warmup
@@ -679,7 +685,7 @@ class RLVRVLMPipeline(BasePipeline):
                 self.state.step = global_step
                 self.state.log_history.append(metrics)
                 for domain, scheduler in self.generate_schedulers.items():
-                    self.state.kv[f"scheduler_state_{domain}"] = ray.get(scheduler.get_scheduler_state.remote())
+                    self.state.kv[f"scheduler_state_{domain}"] = get_backend().get(get_backend().invoke(scheduler, "get_scheduler_state"))
 
                 self.do_checkpoint(global_step=global_step)
 
@@ -705,9 +711,9 @@ class RLVRVLMPipeline(BasePipeline):
                 global_step += 1
             pre_step_total_time = step_total_timer.last
 
-        ray.get([scheduler.shutdown.remote() for scheduler in self.generate_schedulers.values()])
+        get_backend().get([get_backend().invoke(scheduler, "shutdown") for scheduler in self.generate_schedulers.values()])
         if self.val_dataset:
-            ray.get(self.val_generate_scheduler.shutdown.remote())
+            get_backend().get(get_backend().invoke(self.val_generate_scheduler, "shutdown"))
 
         logger.info("pipeline complete!")
 
@@ -722,8 +728,8 @@ class RLVRVLMPipeline(BasePipeline):
             batch.meta_info.update(
                 {"global_step": self.global_step, "max_steps": self.pipeline_config.max_steps, "is_training": False}
             )
-            generate_output: DataProto = ray.get(
-                self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
+            generate_output: DataProto = get_backend().get(
+                get_backend().invoke(self.val_generate_scheduler, "get_batch", data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
                 timeout=self.pipeline_config.rpc_timeout,
             )
             generate_output.meta_info.pop("is_offload_states", None)

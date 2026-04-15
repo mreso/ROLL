@@ -6,12 +6,11 @@ from functools import partial
 from typing import Any, Dict, List
 
 import datasets
-import ray
+from roll.distributed.backend import get_backend
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from codetiming import Timer
-from ray.util.timer import _Timer
 
 from roll.datasets.chat_template import get_chat_template
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
@@ -222,13 +221,13 @@ class DistillPipeline(BasePipeline):
             worker_config=self.pipeline_config.teacher,
         )
 
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.student.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.teacher.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
         self.logits_transfer_group = LogitsTransferGroup(self.teacher, self.student,
                                                          backend=self.pipeline_config.logits_transfer_backend,)

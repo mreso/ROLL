@@ -4,7 +4,6 @@ import threading
 import time
 from typing import Dict, Optional, Union, List
 
-import ray
 import torch
 from codetiming import Timer
 from tqdm import tqdm

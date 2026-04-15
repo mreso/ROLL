@@ -4,7 +4,7 @@ from typing import Optional, Union, Iterator
 import json
 import re
 
-import ray
+from roll.distributed.backend import get_backend
 import torch
 from codetiming import Timer
 

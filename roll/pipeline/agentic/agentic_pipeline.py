@@ -5,11 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import numpy as np
-import ray
 import torch
 from codetiming import Timer
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.util.timer import _Timer
+
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 
 from roll.datasets.global_dataset import GlobalDatasetManager
 from roll.distributed.executor.cluster import Cluster
@@ -121,68 +122,85 @@ class AgenticPipeline(BasePipeline):
         self.tokenizer = default_tokenizer_provider(model_args=self.pipeline_config.actor_train.model_args)
 
         if self.reward:
-            # Create reward scheduler as Ray named actor for environment managers to access
-            self.reward_scheduler = ray.remote(RouterManager).options(
+            # Create reward scheduler as named actor for environment managers to access
+            backend = get_backend()
+            node_info = backend.get_current_node()
+            placement_spec = PlacementSpec(
+                node_id=node_info.node_id
+            )
+            self.reward_scheduler = backend.create_actor(
+                cls=RouterManager,
                 name=f"RewardScheduler-{self.pipeline_config.reward.name}",
                 get_if_exists=True,
                 namespace=RAY_NAMESPACE,
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(),
-                    soft=False,
-                ),
-            ).remote(
-                actor_cluster=self.reward,
-                router_args=RouterArguments(router_name="EnvAffinityRouter"),
-                num_gpus_per_node=self.pipeline_config.num_gpus_per_node
+                placement=placement_spec,
+                args=(
+                    self.reward,
+                    RouterArguments(router_name="EnvAffinityRouter"),
+                    self.pipeline_config.num_gpus_per_node,
+                )
             )
-            ray.get(self.reward_scheduler.initialize.remote())
+            backend.get(backend.invoke(self.reward_scheduler, "initialize"))
             logger.info(f"Created reward scheduler as Ray named actor: RewardScheduler-{self.pipeline_config.reward.name}")
 
         # INIT PHASE: Create RolloutSchedulers
-        self.train_rollout_scheduler = ray.remote(RolloutScheduler).options(
+        backend = get_backend()
+        node_info = backend.get_current_node()
+        placement_spec = PlacementSpec(
+            node_id=node_info.node_id
+        )
+        self.train_rollout_scheduler = backend.create_actor(
+            cls=RolloutScheduler,
             name="RolloutScheduler-train",
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=ray.get_runtime_context().get_node_id(),
-                soft=False)).remote(
-            config=self.pipeline_config,
-            env_manager_config=self.pipeline_config.train_env_manager,
-            resource_manager=self.resource_manager,
-            infer_cluster=self.actor_infer,
-            mode="train",
+            placement=placement_spec,
+            args=(
+                self.pipeline_config,
+                self.pipeline_config.train_env_manager,
+                self.resource_manager,
+                self.actor_infer,
+                "train",
+            )
         )
 
-        self.val_rollout_scheduler = ray.remote(RolloutScheduler).options(
+        self.val_rollout_scheduler = backend.create_actor(
+            cls=RolloutScheduler,
             name="RolloutScheduler-val",
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=ray.get_runtime_context().get_node_id(),
-                soft=False)).remote(
-            config=self.pipeline_config,
-            env_manager_config=self.pipeline_config.val_env_manager,
-            resource_manager=self.resource_manager,
-            infer_cluster=self.actor_infer,
-            mode="val",
+            placement=placement_spec,
+            args=(
+                self.pipeline_config,
+                self.pipeline_config.val_env_manager,
+                self.resource_manager,
+                self.actor_infer,
+                "val",
+            )
         )
-        self.val_dataset_manager = GlobalDatasetManager.options(name=f"val_dataset_manager",
-                                                                get_if_exists=True,
-                                                                namespace=RAY_NAMESPACE).remote()
+        self.val_dataset_manager = backend.create_actor(
+            cls=GlobalDatasetManager,
+            name="val_dataset_manager",
+            get_if_exists=True,
+            namespace=RAY_NAMESPACE
+        )
         # INIT PHASE: Initialize Clusters
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
         if self.pipeline_config.adv_estimator == "gae":
             refs.extend(self.critic.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        backend.get(refs)
 
         refs = []
         if self.reward:
             # INIT PHASE: Initialize Reward Cluster
             refs.extend(self.reward.initialize(pipeline_config=self.pipeline_config, blocking=False))
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        backend.get(refs)
 
         if self.use_ref_model:
             refs.extend(self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True))
 
-        ray.get([self.train_rollout_scheduler.initialize.remote(), self.val_rollout_scheduler.initialize.remote()])
+        backend.get([
+            backend.invoke(self.train_rollout_scheduler, "initialize"),
+            backend.invoke(self.val_rollout_scheduler, "initialize")
+        ])
 
         # INIT PHASE: Setup Operations
         self.set_model_update_pair(
@@ -206,6 +224,7 @@ class AgenticPipeline(BasePipeline):
 
     @torch.no_grad()
     def run(self):
+        backend = get_backend()
         # Calculate tokens-per-second system throughput
         tps_timer = _Timer(window_size=5)
 
@@ -226,7 +245,7 @@ class AgenticPipeline(BasePipeline):
 
                     # PHASE 2: Suspend & Stop Server
                     # Suspend rollout scheduler to pause request processing
-                    ray.get(self.train_rollout_scheduler.suspend.remote())
+                    backend.get(backend.invoke(self.train_rollout_scheduler, "suspend"))
 
                     # Stop generation server if using async mode (will restart after model update)
                     if self.pipeline_config.async_pipeline:
@@ -258,8 +277,8 @@ class AgenticPipeline(BasePipeline):
                                 target_gpus.extend(self.critic.worker_config.device_mapping)
 
                         if target_gpus:
-                            expand_metrics = ray.get(
-                                self.train_rollout_scheduler.expand_sampler.remote(target_gpus, skip_load=True)
+                            expand_metrics = backend.get(
+                                backend.invoke(self.train_rollout_scheduler, "expand_sampler", target_gpus, skip_load=True)
                             )
                             logger.info(f"Expand routing state (skip_load): {expand_metrics}")
                             metrics.update({"expand/" + k: v for k, v in expand_metrics.items()})
@@ -277,7 +296,7 @@ class AgenticPipeline(BasePipeline):
 
                         # PHASE 7: Rollout Get Batch
                         with Timer(name="rollout", logger=None) as rollout_timer:
-                            batch = ray.get(self.train_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.rollout_batch_size))
+                            batch = backend.get(backend.invoke(self.train_rollout_scheduler, "get_batch", args=(batch, self.pipeline_config.rollout_batch_size)))
                             sample_uuids = [f"{traj_id}_{i}" for i, traj_id in enumerate(batch.non_tensor_batch['traj_id'])]
                             batch.non_tensor_batch['sample_uuid'] = np.array(sample_uuids, dtype=object)
                             if "get_batch_return_start_time" in batch.meta_info:
@@ -305,7 +324,7 @@ class AgenticPipeline(BasePipeline):
                     if not self.pipeline_config.async_pipeline:
                         # Suspend scheduler before offload actor infer, because there may be
                         # some inflight redundant trajectories.
-                        ray.get(self.train_rollout_scheduler.suspend.remote())
+                        backend.get(backend.invoke(self.train_rollout_scheduler, "suspend"))
                         self.actor_infer.offload_states()
                         if self.reward:
                             self.reward.offload_states()
@@ -333,7 +352,7 @@ class AgenticPipeline(BasePipeline):
                                     target_gpus.extend(self.critic.worker_config.device_mapping)
 
                             assert target_gpus, "cannot be empty"
-                            shrink_metrics = ray.get(self.train_rollout_scheduler.shrink_sampler.remote(target_gpus))
+                            shrink_metrics = backend.get(backend.invoke(self.train_rollout_scheduler, "shrink_sampler", target_gpus))
                             logger.info(f"Shrink sampler: {shrink_metrics}")
                             metrics.update({"shrink/" + k: v for k, v in shrink_metrics.items()})
                         metrics["time/step_shrink"] = shrink_timer.last
@@ -364,10 +383,10 @@ class AgenticPipeline(BasePipeline):
                                 batch.meta_info["disable_adapter"] = True
                                 batch.meta_info["is_offload_states"] = False
                                 batch_balance(batch, dp_size=self.actor_train.dp_size, minibatch_size=len(batch))
-                                ref_log_probs_refs: List[ray.ObjectRef] = self.actor_train.compute_log_probs(batch, blocking=False)
+                                ref_log_probs_refs: List[RemoteRef] = self.actor_train.compute_log_probs(batch, blocking=False)
                             else:
                                 batch_balance(batch, dp_size=self.reference.dp_size, minibatch_size=len(batch))
-                                ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(batch, blocking=False)
+                                ref_log_probs_refs: List[RemoteRef] = self.reference.compute_log_probs(batch, blocking=False)
 
                             ref_log_probs = DataProto.materialize_concat(data_refs=ref_log_probs_refs)
                             ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
@@ -410,7 +429,7 @@ class AgenticPipeline(BasePipeline):
                             batch.batch["old_log_probs"] = torch.zeros_like(batch.batch["attention_mask"][:, 1:])
 
                         if self.pipeline_config.adv_estimator == "gae":
-                            values_refs: List[ray.ObjectRef] = self.critic.compute_values(batch, blocking=False)
+                            values_refs: List[RemoteRef] = self.critic.compute_values(batch, blocking=False)
 
                         if self.pipeline_config.adv_estimator == "gae":
                             values = DataProto.materialize_concat(data_refs=values_refs)
@@ -472,7 +491,7 @@ class AgenticPipeline(BasePipeline):
                     # PHASE 14: Training (critic + actor)
                     with Timer(name="train_timer", logger=None) as train_timer:
                         if self.pipeline_config.adv_estimator == "gae":
-                            critic_train_metrics_refs: List[ray.ObjectRef] = self.critic.train_step(batch, blocking=False)
+                            critic_train_metrics_refs: List[RemoteRef] = self.critic.train_step(batch, blocking=False)
 
                         # implement critic warmup
                         if self.pipeline_config.critic_warmup <= global_step:
@@ -522,7 +541,7 @@ class AgenticPipeline(BasePipeline):
                         if int(os.environ.get("RAY_PROFILING", "0")):
                             timeline_dir = os.path.join(self.pipeline_config.profiler_output_dir, "timeline")
                             os.makedirs(timeline_dir, exist_ok=True)
-                            ray.timeline(
+                            backend.export_timeline(
                                 filename=os.path.join(timeline_dir, f"timeline-step-{global_step}.json"),
                             )
 
@@ -572,9 +591,9 @@ class AgenticPipeline(BasePipeline):
             global_step += 1
             logger.info(f"epoch {global_step} finished")
 
-        ray.get([
-            self.train_rollout_scheduler.shutdown.remote(),
-            self.val_rollout_scheduler.shutdown.remote(),
+        backend.get([
+            backend.invoke(self.train_rollout_scheduler, "shutdown"),
+            backend.invoke(self.val_rollout_scheduler, "shutdown"),
         ])
 
 
@@ -582,12 +601,13 @@ class AgenticPipeline(BasePipeline):
 
 
     def val(self, global_step):
+        backend = get_backend()
         batch = DataProto()
         metrics = {}
         batch.meta_info["is_offload_states"] = False
         batch.meta_info["global_step"] = global_step
-        ray.get(self.val_dataset_manager.reset.remote())
-        eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
+        backend.get(backend.invoke(self.val_dataset_manager, "reset"))
+        eval_batch = backend.get(backend.invoke(self.val_rollout_scheduler, "get_batch", args=(batch, self.pipeline_config.val_batch_size)))
 
         if "get_batch_return_start_time" in eval_batch.meta_info:
             metrics["time/get_batch_cost_val"] = time.time() - eval_batch.meta_info.pop("get_batch_return_start_time")

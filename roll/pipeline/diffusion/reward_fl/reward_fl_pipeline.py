@@ -1,6 +1,7 @@
 from typing import Any, Dict, List
 import os
-import ray
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 import torch
 import torchvision
 from codetiming import Timer
@@ -60,9 +61,9 @@ class RewardFLPipeline(BasePipeline):
             ),
         )
         self.dataloader = torch.utils.data.DataLoader(dataset, batch_size=pipeline_config.train_batch_size, collate_fn=collate_fn)
-        refs: List[ray.ObjectRef] = []
+        refs: List[RemoteRef] = []
         refs.extend(self.actor_train.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
         self.set_checkpoint_clusters(self.actor_train)
 

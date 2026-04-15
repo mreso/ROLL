@@ -8,8 +8,9 @@ from io import BytesIO
 from typing import Optional, Dict, List, Tuple
 
 import datasets
-import ray
+from roll.distributed.backend import get_backend
 import numpy as np
+import ray
 from dacite import from_dict
 from gem import Env
 from transformers.image_utils import load_image
@@ -220,10 +221,10 @@ class DeepEyesEnv(Env):
         self.dataset_manager = GlobalDatasetManager.options(
             name=f"{self.mode}_dataset_manager", get_if_exists=True, namespace=RAY_NAMESPACE
         ).remote()
-        ray.get(self.dataset_manager.register.remote(dataset_name="deepeyes", dataset_ref=self.dataset))
+        get_backend().get(self.dataset_manager.register.remote(dataset_name="deepeyes", dataset_ref=self.dataset))
 
     def reset(self, seed=None):
-        data: Optional[Dict] = ray.get(self.dataset.get_data_item.remote(seed=seed))
+        data: Optional[Dict] = get_backend().get(self.dataset.get_data_item.remote(seed=seed))
         self._data_item = data
         first_obs = {"prompt": self._data_item["prompt"], "image": [self._data_item["images"][0]]}
         self.visual_toolbox.reset(first_obs["image"])

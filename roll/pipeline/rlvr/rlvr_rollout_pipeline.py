@@ -4,10 +4,12 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 import datasets
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef, PlacementSpec
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import torch
 from codetiming import Timer
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from roll.datasets.collator import DataCollatorWithPaddingForPaddedKeys
 from roll.distributed.executor.cluster import Cluster
@@ -108,14 +110,14 @@ class RLVRRolloutPipeline(RLVRPipeline):
 
         refs = []
         refs.extend(self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
         refs = []
         for key, cluster in self.rewards.items():
             refs.extend(cluster.initialize(pipeline_config=self.pipeline_config, blocking=False))
-        ray.get(refs)
+        get_backend().get(refs)
 
-        ray.get(self.val_generate_scheduler.initialize.remote())
+        get_backend().get(self.val_generate_scheduler.initialize.remote())
 
     @torch.no_grad()
     def run(self):
@@ -130,7 +132,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
             self.actor_infer.load_states()
             for reward_cluster in self.rewards.values():
                 reward_cluster.load_states()
-            generate_output: DataProto = ray.get(
+            generate_output: DataProto = get_backend().get(
                 self.val_generate_scheduler.get_batch.remote(data=batch, global_step=global_step, batch_size=len(self.val_dataset)),
                 timeout=self.pipeline_config.rpc_timeout,
             )
@@ -164,6 +166,6 @@ class RLVRRolloutPipeline(RLVRPipeline):
 
         logger.info(f"pipeline step {global_step} finished")
 
-        ray.get(self.val_generate_scheduler.shutdown.remote())
+        get_backend().get(self.val_generate_scheduler.shutdown.remote())
 
         logger.info("pipeline complete!")
