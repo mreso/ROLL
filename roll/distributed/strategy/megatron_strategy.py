@@ -7,8 +7,8 @@ from functools import partial
 from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Tuple
 
 import numpy as np
-import ray
-import ray.actor
+from roll.distributed.backend import get_backend
+# import ray.actor  # Migrated to backend abstraction
 import torch
 import torch.distributed as dist
 from codetiming import Timer

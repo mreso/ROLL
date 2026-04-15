@@ -10,6 +10,8 @@ from collections import defaultdict
 from typing import Any, Dict, List, Set
 from urllib.parse import quote
 
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import ActorHandle as BackendActorHandle
 import ray
 
 from roll.distributed.executor.cluster import Cluster
@@ -110,8 +112,10 @@ class RouterManager:
 
     @classmethod
     def create_client_sync(cls, self) -> "RouterClient":
+        if isinstance(self, BackendActorHandle):
+            self = self._inner
         if isinstance(self, ray.actor.ActorHandle):
-            meta = ray.get(self.router_meta.remote())
+            meta = get_backend().get(self.router_meta.remote())
             proxy_cls = RayProxy
         elif isinstance(self, cls):
             meta = self.router_meta()
@@ -129,6 +133,8 @@ class RouterManager:
         """
         self may be a ray actor or normal class.
         """
+        if isinstance(self, BackendActorHandle):
+            self = self._inner
         if isinstance(self, ray.actor.ActorHandle):
             meta = await self.router_meta.remote()
             proxy_cls = RayProxy
@@ -495,13 +501,13 @@ class RayProxy(RouterProxy):
         return await self.router_manager.on_request_routed.remote(request_id)
 
     def generate_request_sync(self, payload, request_id, uid):
-        return ray.get(self.router_manager.generate_request.remote(payload=payload, request_id=request_id, uid=uid))
+        return get_backend().get(self.router_manager.generate_request.remote(payload=payload, request_id=request_id, uid=uid))
 
     def on_send_request_sync(self, request_id):
-        return ray.get(self.router_manager.on_send_request.remote(request_id))
+        return get_backend().get(self.router_manager.on_send_request.remote(request_id))
 
     def on_request_routed_sync(self, request_id):
-        return ray.get(self.router_manager.on_request_routed.remote(request_id))
+        return get_backend().get(self.router_manager.on_request_routed.remote(request_id))
 
 class SglangProxy(RouterProxy):
     def __init__(self, proxy: RouterProxy, router_meta):

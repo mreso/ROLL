@@ -3,8 +3,9 @@ import subprocess
 import time
 import asyncio
 
-import ray
-from ray import WORKER_MODE
+from roll.distributed.backend import get_backend
+# from ray import WORKER_MODE  # Migrated to backend abstraction
+WORKER_MODE = 1  # Constant for backward compatibility
 
 from roll.utils.logging import get_logger
 
@@ -12,7 +13,8 @@ logger = get_logger()
 
 
 def is_driver():
-    return ray.get_runtime_context().worker.mode != WORKER_MODE if ray.is_initialized() else True
+    backend = get_backend()
+    return backend.is_driver() if backend.is_initialized() else True
 
 
 def get_driver_rank():
@@ -96,8 +98,9 @@ def is_ray_cluster_running():
 def wait_for_nodes(expected):
     # Wait for all nodes to join the cluster.
     while True:
-        nodes_info = ray.nodes()
-        active_nodes = [node for node in nodes_info if node["Alive"]]
+        backend = get_backend()
+        nodes_info = backend.nodes()
+        active_nodes = [node for node in nodes_info if node.alive]
         num_nodes = len(active_nodes)
         if num_nodes != expected:
             logger.info(f"{num_nodes} nodes have joined so far, waiting for {expected - num_nodes}.")
@@ -105,7 +108,6 @@ def wait_for_nodes(expected):
         else:
             break
 
-@ray.remote(num_cpus=0)
 class Barrier:
     def __init__(self, num_workers):
         self.num_workers = num_workers
@@ -124,7 +126,6 @@ class Barrier:
         await self.event.wait()
 
 
-@ray.remote
 class Locker:
     def __init__(self):
         self._locked = False

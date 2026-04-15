@@ -3,7 +3,8 @@ import subprocess
 import sys
 import time
 
-import ray
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import BackendConfig
 
 from roll.distributed.scheduler.driver_utils import (
     get_driver_rank,
@@ -65,22 +66,24 @@ def init():
         "env_vars": current_platform.get_custom_env_vars(),
     }
 
-    if not ray.is_initialized():
-        ray.init(
+    # Initialize backend
+    backend = get_backend()
+    if not backend.is_initialized():
+        config = BackendConfig(
             address=f"{master_addr}:{master_port}" if manual_start else None,
             namespace=RAY_NAMESPACE,
-            ignore_reinit_error=True,
+            env_vars=runtime_env.get("env_vars"),
             log_to_driver=not manual_start,
-            runtime_env=runtime_env,
         )
-        logger.info("Ray cluster initialized")
+        backend.init(config)
+        logger.info("Backend cluster initialized")
 
     if manual_start:
         wait_for_nodes(expected=world_size)
         listener = LogMonitorListener()
         listener.start()
 
-    logger.info(f"Current ray cluster resources: {ray.available_resources()}")
+    logger.info(f"Current backend cluster resources: {backend.available_resources()}")
 
     if manual_start and rank > 0:
         sys.exit(0)

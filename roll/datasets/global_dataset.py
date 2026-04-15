@@ -2,7 +2,6 @@ import asyncio
 import random
 from typing import Dict, Optional, Any, Callable
 
-import ray
 from datasets import Dataset
 
 from roll.datasets.dataset import create_local_dataset
@@ -11,7 +10,6 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
-@ray.remote
 class GlobalDataset:
     def __init__(self, dataset_name, split: str = "train", mode="sample", dataset_kwargs: Dict = None):
         self.mode = mode
@@ -69,7 +67,6 @@ class GlobalDataset:
         logger.info(f"---- after filter-- {filter_name}, dataset_name: {self.dataset_name} len: {len(self.dataset)}")
 
 
-@ray.remote
 class GlobalDatasetManager:
     def __init__(self):
         self.global_dataset_dict: Dict[str, Any] = {}

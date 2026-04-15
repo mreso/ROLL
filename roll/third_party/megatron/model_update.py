@@ -2,8 +2,10 @@ import time
 from dataclasses import asdict
 from typing import Optional
 
-import ray
 import torch
+
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef
 import torch.distributed as dist
 from megatron.core import mpu
 from transformers.utils import is_peft_available
@@ -358,9 +360,13 @@ class MegatronWeightUpdater:
         self._weights_meta = gather_weights_meta_cross_pp(self.models_unwrapped)
 
     def _setup_separated_model_update(self):
-        self._model_update_locker = Locker.options(
-            name="model_update_locker", get_if_exists=True, namespace=RAY_NAMESPACE
-        ).remote()
+        backend = get_backend()
+        self._model_update_locker = backend.create_actor(
+            cls=Locker,
+            name="model_update_locker",
+            get_if_exists=True,
+            namespace=RAY_NAMESPACE
+        )
         if not (
             mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         ):
@@ -403,11 +409,12 @@ class MegatronWeightUpdater:
             master_addr=master_address,
             master_port=master_port,
         )
-        ray.get(refs)
+        backend = get_backend()
+        backend.get(refs)
 
         logger.info(f"Init weights update group {model_update_group_name}")
 
-    def _broadcast_to_infer_workers(self, hf_named_weights) -> list[ray.ObjectRef]:
+    def _broadcast_to_infer_workers(self, hf_named_weights) -> list[RemoteRef]:
         if not self._broadcast_workers:
             return []
         refs = [
@@ -430,6 +437,7 @@ class MegatronWeightUpdater:
         return refs
 
     def _colocated_model_update(self):
+        backend = get_backend()
         refs = []
         infer_parallel_size = dist.get_world_size(self._infer_parallel_cpu_group)
         co_infer_rank = dist.get_rank(self._infer_parallel_cpu_group)
@@ -448,8 +456,8 @@ class MegatronWeightUpdater:
                 )
 
             if refs:
-                ray.get(refs)
-                refs = []
+                backend.get(refs)
+            refs = []
             if co_infer_rank == 0 and self._co_infer_worker is not None:
                 refs.append(
                     self._co_infer_worker.update_parameter_in_bucket.remote(infer_parallel_tensors, is_lora=is_lora)
@@ -458,8 +466,8 @@ class MegatronWeightUpdater:
                 refs.extend(self._broadcast_to_infer_workers(hf_named_weights))
 
         if refs:
-            ray.get(refs)
-            refs = []
+            backend.get(refs)
+        refs = []
 
         if is_lora and co_infer_rank == 0 and self._co_infer_worker is not None:
             refs.append(self._co_infer_worker.add_lora.remote(peft_config=asdict(peft_config)))
@@ -469,15 +477,19 @@ class MegatronWeightUpdater:
         if not mpu.get_expert_data_parallel_rank() == 0:
             return {}
 
+        backend = get_backend()
         logger.info(f"start broadcast model update {self.model_update_name}")
         for hf_named_weights in gather_pp_stage_hf_weights(
             self.models_unwrapped, buffer_size=self._model_update_buffer_size
         ):
             if not self._broadcast_workers:
                 continue
-            while not ray.get(self._model_update_locker.acquire.remote()):
+            while True:
+                acquire_ref = backend.invoke(self._model_update_locker, "acquire")
+                if backend.get(acquire_ref):
+                    break
                 time.sleep(0.1)
             refs = self._broadcast_to_infer_workers(hf_named_weights)
-            ray.get(refs)
-            ray.get(self._model_update_locker.release.remote())
+        backend.get(refs)
+        backend.get(backend.invoke(self._model_update_locker, "release"))
         return {}

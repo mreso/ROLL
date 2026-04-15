@@ -11,7 +11,6 @@ from roll.distributed.scheduler.decorator import register, Dispatch
 from roll.distributed.scheduler.resource_manager import ResourceManager
 
 
-@ray.remote
 class TestWorker(Worker):
 
     def __init__(self, worker_config: WorkerConfig):
@@ -25,7 +24,6 @@ class TestWorker(Worker):
         return self.value
 
 
-@ray.remote
 class TestDPWorker(Worker):
 
     def __init__(self, worker_config: WorkerConfig):

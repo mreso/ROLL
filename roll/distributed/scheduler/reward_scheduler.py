@@ -2,7 +2,7 @@ import asyncio
 from collections import defaultdict
 from typing import Dict, Optional, List, Any
 
-import ray
+from roll.distributed.backend.types import RemoteRef
 from tqdm import tqdm
 import torch
 
@@ -41,7 +41,7 @@ class RewardScheduler:
         # 按domain group by data
         grouped_data: Dict[str, DataProto] = data.group_by("domain")
 
-        domain_rewards_refs: Dict[str, List[ray.ObjectRef]] = defaultdict(list)
+        domain_rewards_refs: Dict[str, List[RemoteRef]] = defaultdict(list)
         for domain, reward_cluster in reward_clusters.items():
             if domain not in grouped_data.keys():
                 continue

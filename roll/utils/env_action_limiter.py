@@ -1,10 +1,11 @@
 import asyncio
 import time
 from typing import Dict
-import ray
+
+from roll.distributed.backend import get_backend
 from roll.utils.constants import RAY_NAMESPACE
 
-@ray.remote
+
 class GlobalLimiter:
     """Global call rate limiter, controls the concurrent number of all tool calls"""
     
@@ -73,36 +74,47 @@ class LimiterClient:
     
     def _initialize_limiter(self):
         """Initialize global rate limiter"""
+        backend = get_backend()
         limiter_name = f"GlobalLimiter_{self.tag}"
-        self.limiter = GlobalLimiter.options(
+        self.limiter = backend.create_actor(
+            cls=GlobalLimiter,
+            args=(self.max_concurrent_calls,),
             name=limiter_name,
             get_if_exists=True,
             namespace=RAY_NAMESPACE,
-        ).remote(max_concurrent_calls=self.max_concurrent_calls)
+        )
 
     def acquire(self) -> str:
         """Synchronously acquire call permission"""
         if self.limiter is None:
             self._initialize_limiter()
-        return ray.get(self.limiter.acquire.remote())
+        backend = get_backend()
+        acquire_ref = backend.invoke(self.limiter, "acquire")
+        return backend.get(acquire_ref)
     
     def release(self, acquire_id: str):
         """Synchronously release call permission"""
         if self.limiter is None:
             self._initialize_limiter()
-        ray.get(self.limiter.release.remote(acquire_id))
+        backend = get_backend()
+        release_ref = backend.invoke(self.limiter, "release", (acquire_id,))
+        backend.get(release_ref)
     
     def get_stats(self) -> Dict:
         """Get statistics information"""
         if self.limiter is None:
             self._initialize_limiter()
-        return ray.get(self.limiter.get_stats.remote())
+        backend = get_backend()
+        stats_ref = backend.invoke(self.limiter, "get_stats")
+        return backend.get(stats_ref)
     
     def update_limit(self, new_limit: int):
         """Update concurrent limit"""
         if self.limiter is None:
             self._initialize_limiter()
-        ray.get(self.limiter.update_limit.remote(new_limit))
+        backend = get_backend()
+        update_ref = backend.invoke(self.limiter, "update_limit", (new_limit,))
+        backend.get(update_ref)
 
     def __enter__(self):
         self._acquire_id = self.acquire()

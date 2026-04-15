@@ -5,8 +5,6 @@ from concurrent import futures
 from dataclasses import dataclass
 from typing import Dict, Optional, List
 
-import ray
-
 from roll.configs.worker_config import WorkerConfig
 from roll.distributed.scheduler.decorator import Dispatch, register
 from roll.distributed.scheduler.protocol import DataProto
@@ -53,9 +51,16 @@ class Worker:
         self.rank = int(os.environ.get("RANK", 0))
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.shared_storage = SharedStorage.options(
-            name=STORAGE_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
-        ).remote()
+
+        # Create or get SharedStorage actor via backend
+        from roll.distributed.backend import get_backend
+        backend = get_backend()
+        self.shared_storage = backend.create_actor(
+            cls=SharedStorage,
+            name=STORAGE_NAME,
+            get_if_exists=True,
+            namespace=RAY_NAMESPACE
+        )
 
         if self.rank == 0:
             master_addr = self.get_node_ip()
@@ -65,8 +70,10 @@ class Worker:
 
         self.master_addr = os.environ["MASTER_ADDR"]
         self.master_port = int(os.environ["MASTER_PORT"])
-        self.shared_storage.put.remote(
-            self.cluster_name, {"MASTER_ADDR": self.master_addr, "MASTER_PORT": self.master_port}
+        backend.invoke(
+            self.shared_storage,
+            "put",
+            args=(self.cluster_name, {"MASTER_ADDR": self.master_addr, "MASTER_PORT": self.master_port})
         )
         # NOTE: 自定义Worker时根据需要配置rank_info
         self.rank_info = RankInfo(
@@ -95,16 +102,24 @@ class Worker:
 
     @staticmethod
     def get_free_port():
-        shared_storage = SharedStorage.options(
-            name=STORAGE_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
-        ).remote()
+        from roll.distributed.backend import get_backend
+        backend = get_backend()
+
+        # Create or get SharedStorage actor via backend
+        shared_storage = backend.create_actor(
+            cls=SharedStorage,
+            name=STORAGE_NAME,
+            get_if_exists=True,
+            namespace=RAY_NAMESPACE
+        )
         master_addr = Worker.get_node_ip()
         max_retry_count = int(os.environ.get("MAX_PORT_RETRY_COUNT", 1000))
 
         for i in range(max_retry_count):
             master_port = collect_free_port()
             master_addr_port_key = f"MASTER_ADDR_PORT:{master_addr}:{master_port}"
-            success = ray.get(shared_storage.put_if_absent.remote(master_addr_port_key, True))
+            success_ref = backend.invoke(shared_storage, "put_if_absent", (master_addr_port_key, True))
+            success = backend.get(success_ref)
             if success:
                 return master_port
         raise RuntimeError(f"Can not allocate unique MASTER_PORT on {master_addr}.")

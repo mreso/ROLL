@@ -1,6 +1,6 @@
 import copy
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from typing import Dict, Literal, List
 
@@ -10,7 +10,13 @@ import torch.distributed as dist
 import logging
 
 from codetiming import Timer
-from ray._private import profiling
+# Optional profiling support
+try:
+    from ray._private import profiling
+    _PROFILING_AVAILABLE = True
+except ImportError:
+    _PROFILING_AVAILABLE = False
+    profiling = None
 
 from roll.platforms import current_platform
 from roll.utils.offload_states import OffloadStateType
@@ -156,7 +162,8 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
     """
     os.environ["roll_EXEC_FUNC_NAME"] = metric_infix
     with Timer(name=f"{metric_infix}_total") as timer, local_profiler():
-        with Timer(name=f"{metric_infix}_onload") as onload_timer, profiling.profile("load_states"):
+        profile_ctx = profiling.profile("load_states") if _PROFILING_AVAILABLE else nullcontext()
+        with Timer(name=f"{metric_infix}_onload") as onload_timer, profile_ctx:
             for device_id in range(current_platform.device_count()):
                 current_platform.reset_max_memory_allocated(device_id)
                 current_platform.reset_max_memory_cached(device_id)
@@ -177,10 +184,12 @@ def state_offload_manger(strategy, metrics: Dict, metric_infix: str, is_offload_
             metrics.update(_get_gpu_memory_metrics(metric_infix, "start/onload"))
             metrics.update(_get_cpu_memory_metrics(metric_infix, "start"))
 
-        with Timer(name=f"{metric_infix}_execute") as execute_timer, profiling.profile("execute"):
+        profile_ctx = profiling.profile("execute") if _PROFILING_AVAILABLE else nullcontext()
+        with Timer(name=f"{metric_infix}_execute") as execute_timer, profile_ctx:
             yield
 
-        with Timer(name=f"{metric_infix}_offload") as offload_timer, profiling.profile("offload_states"):
+        profile_ctx = profiling.profile("offload_states") if _PROFILING_AVAILABLE else nullcontext()
+        with Timer(name=f"{metric_infix}_offload") as offload_timer, profile_ctx:
             metrics.update(_get_gpu_memory_metrics(metric_infix, "end/onload", with_max_frac=True))
 
             log_gpu_memory_usage(head=f"{metric_infix}_end_onload", logger=logger, rank=None)

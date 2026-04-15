@@ -8,6 +8,7 @@ import pathlib
 import random
 import setproctitle
 
+from roll.distributed.backend import get_backend
 import ray
 import grpc
 import httpx
@@ -154,8 +155,13 @@ class SgLangStrategy(InferenceStrategy):
                     'num_cpus': 0.01,
                     'num_gpus': 0.01
                 }
-                sglang_worker = ray.remote(SglangSlaveActor).options(**sglang_ray_option).remote()
-                sglang_worker.initialize.remote(sglang_args_list[i])
+                backend = get_backend()
+                sglang_worker = backend.create_actor(
+                    cls=SglangSlaveActor,
+                    num_cpus=sglang_ray_option.get('num_cpus', 0),
+                    num_gpus=sglang_ray_option.get('num_gpus', 0)
+                )
+                backend.invoke(sglang_worker, "initialize", args=(sglang_args_list[i],))
                 self.slave_list.append(sglang_worker)
 
         # grpc_mode is supported from v0.4.10

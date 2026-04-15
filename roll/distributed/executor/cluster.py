@@ -1,13 +1,10 @@
 import os
+import inspect
 from typing import List, Type, Dict, Union, Any
 
-import ray
-from ray._private.async_compat import has_async_methods
-from ray._private.worker import RemoteFunctionNoArgs
-from ray.runtime_env import RuntimeEnv
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
 from roll.configs.worker_config import WorkerConfig
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import ActorHandle, PlacementSpec
 from roll.distributed.executor.worker import Worker, RankInfo
 from roll.distributed.scheduler.decorator import (
     BIND_WORKER_METHOD_FLAG,
@@ -28,12 +25,22 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 
+def _has_async_methods(cls: Type) -> bool:
+    """Check if a class has async methods (replacement for ray._private.async_compat.has_async_methods)"""
+    for name in dir(cls):
+        if not name.startswith('_'):
+            method = getattr(cls, name, None)
+            if callable(method) and inspect.iscoroutinefunction(method):
+                return True
+    return False
+
+
 class Cluster:
 
     def __init__(
         self,
         name,
-        worker_cls: Union[RemoteFunctionNoArgs[Worker], Type[Worker], str],
+        worker_cls: Union[Type[Worker], str],
         resource_manager: ResourceManager,
         worker_config: WorkerConfig,
     ):
@@ -42,16 +49,13 @@ class Cluster:
         if isinstance(worker_cls, str):
             worker_cls = safe_import_class(worker_cls)
 
-        if not hasattr(worker_cls, "__ray_actor_class__"):
-            logger.info(f"wrap {worker_cls.__name__} to ray.remote()")
-            self.worker_cls = ray.remote(worker_cls)
-        else:
-            self.worker_cls = worker_cls
+        self.worker_cls = worker_cls
+        self.backend = get_backend()
         self.resource_manager = resource_manager
         self.placement_groups = None
         self.worker_config = worker_config
 
-        self.workers: List[Any] = []
+        self.workers: List[ActorHandle] = []
 
         self.master_addr = None
         self.master_port = None
@@ -64,12 +68,20 @@ class Cluster:
 
         self.rank2worker = {k: self.workers[k] for k in range(len(self.workers))}
         self.worker2rank = {self.workers[k]: k for k in range(len(self.workers))}
-        self.rank2devices = dict(zip(map(lambda worker: self.worker2rank[worker], self.workers),
-                                     ray.get([worker.get_devices_info.remote() for worker in self.workers])))
-        self.worker2nodes = dict(zip(self.workers, ray.get([worker.get_node_ip.remote() for worker in self.workers])))
+
+        # Get device info from all workers
+        devices_refs = [self.backend.invoke(worker, "get_devices_info") for worker in self.workers]
+        devices_info = self.backend.get(devices_refs)
+        self.rank2devices = dict(zip(map(lambda worker: self.worker2rank[worker], self.workers), devices_info))
+
+        # Get node IPs from all workers
+        node_refs = [self.backend.invoke(worker, "get_node_ip") for worker in self.workers]
+        node_ips = self.backend.get(node_refs)
+        self.worker2nodes = dict(zip(self.workers, node_ips))
+
         logger.debug(f"{self.cluster_name} rank2devices {self.rank2devices}")
-        # for cluster object can transfer by ray rpc.
-        del self.worker_cls
+        # Keep worker_cls for backend create_actor calls
+        # Note: Unlike Ray version, we keep worker_cls as it's needed for backend.create_actor()
 
     @property
     def dp_size(self):
@@ -89,7 +101,8 @@ class Cluster:
 
     @property
     def vp_size(self):
-        if 'virtual_pipeline_model_parallel_size' in self.worker_config.strategy_args.strategy_config:
+        if (self.worker_config.strategy_args.strategy_config and
+            'virtual_pipeline_model_parallel_size' in self.worker_config.strategy_args.strategy_config):
             return self.worker_config.strategy_args.strategy_config['virtual_pipeline_model_parallel_size']
         else:
             return 1
@@ -141,10 +154,9 @@ class Cluster:
                 env_vars["ROLL_LOG_DIR"] = os.environ["ROLL_LOG_DIR"]
             env_vars.update(self.worker_config.system_envs)
 
-            runtime_env = RuntimeEnv(env_vars=env_vars)
             self.worker_config.resource_placement_groups = pgs
 
-            if has_async_methods(self.worker_cls.__ray_metadata__.modified_class):
+            if _has_async_methods(self.worker_cls):
                 max_concurrency = (self.worker_config.max_concurrency if self.worker_config.max_concurrency > 1
                                 else 1000) # equivalent to DEFAULT_MAX_CONCURRENCY_ASYNC in ray
                 logger.info(f"set max_concurrency to {max_concurrency} for worker {type(self.worker_cls)}")
@@ -152,31 +164,34 @@ class Cluster:
                 assert self.worker_config.max_concurrency == 1
                 max_concurrency = 1
 
-            worker_options = {
-                "scheduling_strategy": PlacementGroupSchedulingStrategy(placement_group=deploy_pg["placement_group"]),
-                "name": worker_name,
-                "namespace": RAY_NAMESPACE,
-                "runtime_env": runtime_env,
-                "num_cpus": 0.01,
-                "max_concurrency": max_concurrency,
-            }
+            # Set up placement specification
+            placement = PlacementSpec(placement_group=deploy_pg["placement_group"])
 
+            # Configure GPU/NPU resources
+            num_cpus = 0.01
+            num_gpus = 0.0
             if current_platform.ray_device_key == "GPU":
-                worker_options.update({"num_gpus": 0.01 if self.worker_config.device_mapping else 0})
+                num_gpus = 0.01 if self.worker_config.device_mapping else 0
             elif current_platform.ray_device_key == "NPU":
-                worker_options.update(
-                    {
-                        "num_gpus": 0,
-                        "resources": {
-                            current_platform.ray_device_key: 0.01 if self.worker_config.device_mapping else 0
-                        },
-                    }
-                )
+                # NPU resources will be handled via custom resources in the future
+                # For now, keep num_gpus = 0 and rely on placement groups
+                pass
 
-            worker = self.worker_cls.options(**worker_options).remote(worker_config=self.worker_config)
+            worker = self.backend.create_actor(
+                cls=self.worker_cls,
+                args=(self.worker_config,),  # worker_config passed as positional arg
+                name=worker_name,
+                namespace=RAY_NAMESPACE,
+                placement=placement,
+                env_vars=env_vars,
+                num_cpus=num_cpus,
+                num_gpus=num_gpus,
+                max_concurrency=max_concurrency,
+            )
             self.workers.append(worker)
             if rank == 0:
-                self.master_addr, self.master_port = ray.get(worker.get_master_addr_and_port.remote())
+                master_ref = self.backend.invoke(worker, "get_master_addr_and_port")
+                self.master_addr, self.master_port = self.backend.get(master_ref)
 
     def _bind_worker_method(self):
         """
@@ -233,11 +248,10 @@ class Cluster:
                     raise ValueError(f"Fail to set method_name {method_name}")
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):
-        return ray.get(self.execute_rank_zero_async(method_name, *args, **kwargs))
+        return self.backend.get(self.execute_rank_zero_async(method_name, *args, **kwargs))
 
     def execute_rank_zero_async(self, method_name: str, *args, **kwargs):
-        remote_call = getattr(self.workers[0], method_name)
-        return remote_call.remote(*args, **kwargs)
+        return self.backend.invoke(self.workers[0], method_name, args, kwargs)
 
     def execute_rank_zero(self, method_name: str, *args, **kwargs):
         return self.execute_rank_zero_async(method_name, *args, **kwargs)
@@ -246,7 +260,7 @@ class Cluster:
         return self.execute_all_async(method_name, *args, **kwargs)
 
     def execute_all_sync(self, method_name: str, *args, **kwargs):
-        return ray.get(self.execute_all_async(method_name, *args, **kwargs))
+        return self.backend.get(self.execute_all_async(method_name, *args, **kwargs))
 
     def execute_all_async(self, method_name: str, *args, **kwargs):
         length = len(self.workers)
@@ -256,8 +270,7 @@ class Cluster:
                 for i in range(length):
                     sliced_args = tuple(arg[i] for arg in args)
                     sliced_kwargs = {k: v[i] for k, v in kwargs.items()}
-                    remote_call = getattr(self.workers[i], method_name)
-                    result.append(remote_call.remote(*sliced_args, **sliced_kwargs))
+                    result.append(self.backend.invoke(self.workers[i], method_name, sliced_args, sliced_kwargs))
                 return result
 
-        return [getattr(worker, method_name).remote(*args, **kwargs) for worker in self.workers]
+        return [self.backend.invoke(worker, method_name, args, kwargs) for worker in self.workers]

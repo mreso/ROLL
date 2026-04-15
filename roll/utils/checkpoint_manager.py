@@ -7,7 +7,7 @@ import tempfile
 import traceback
 from typing import Dict, Optional, Any
 
-import ray
+from roll.distributed.backend import get_backend
 from filelock import FileLock
 from huggingface_hub import snapshot_download
 
@@ -42,13 +42,21 @@ def model_path_cache(func):
         node_ip = get_node_ip()
         global shared_storage
         if shared_storage is None:
-            shared_storage = SharedStorage.options(
-                name=STORAGE_NAME, get_if_exists=True, namespace=RAY_NAMESPACE
-            ).remote()
-        cached_path = ray.get(shared_storage.get.remote(key=f"{node_ip}:{model_name_or_path}"))
+            backend = get_backend()
+            shared_storage = backend.create_actor(
+                cls=SharedStorage,
+                name=STORAGE_NAME,
+                get_if_exists=True,
+                namespace=RAY_NAMESPACE
+            )
+
+        backend = get_backend()
+        cached_ref = backend.invoke(shared_storage, "get", (f"{node_ip}:{model_name_or_path}",))
+        cached_path = backend.get(cached_ref)
         if cached_path is None or not os.path.exists(cached_path):
             cached_path = func(model_name_or_path, local_dir)
-            ray.get(shared_storage.put.remote(key=f"{node_ip}:{model_name_or_path}", data=cached_path))
+            put_ref = backend.invoke(shared_storage, "put", (f"{node_ip}:{model_name_or_path}", cached_path))
+            backend.get(put_ref)
         return cached_path
     return wrapper
 

@@ -1,8 +1,10 @@
 import os
 from dataclasses import asdict
 
-import ray
 import torch
+
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
@@ -150,7 +152,9 @@ class FSDP2WeightUpdater:
         cached = getattr(self, "_co_infer_gpu_rank_order", None)
         if cached is not None:
             return cached
-        devices_info = ray.get(self._co_infer_worker.get_devices_info.remote())
+        backend = get_backend()
+        devices_ref = backend.invoke(self._co_infer_worker, "get_devices_info")
+        devices_info = backend.get(devices_ref)
         order = [int(d["gpu_rank"]) for d in devices_info]
         setattr(self, "_co_infer_gpu_rank_order", order)
         return order
@@ -201,11 +205,13 @@ class FSDP2WeightUpdater:
             master_addr=master_address,
             master_port=master_port,
         )
-        ray.get(refs)
+        backend = get_backend()
+        backend.get(refs)
 
         logger.info(f"Init weights update group {self.model_update_group_name}")
 
     def _colocated_model_update(self):
+        backend = get_backend()
         refs = []
         infer_parallel_size = dist.get_world_size(self._infer_parallel_cpu_group)
         co_infer_rank = dist.get_rank(self._infer_parallel_cpu_group)
@@ -225,8 +231,8 @@ class FSDP2WeightUpdater:
                         send_obj, infer_parallel_tensors, group_dst=0, group=self._infer_parallel_cpu_group
                     )
             if refs:
-                ray.get(refs)
-                refs = []
+                backend.get(refs)
+            refs = []
             if co_infer_rank == 0 and self._co_infer_worker is not None:
                 # Align gathered per-train-rank payloads with vLLM TP-rank GPU order.
                 if infer_parallel_size > 1:
@@ -277,12 +283,12 @@ class FSDP2WeightUpdater:
             if self._broadcast_workers:
                 refs.extend(self._broadcast_to_infer_workers(named_weights))
         if refs:
-            ray.get(refs)
+            backend.get(refs)
         self._add_lora_to_infer_workers()
         torch.cuda.empty_cache()
         return {}
 
-    def _broadcast_to_infer_workers(self, named_weights) -> list[ray.ObjectRef]:
+    def _broadcast_to_infer_workers(self, named_weights) -> list[RemoteRef]:
         if not self._broadcast_workers:
             return []
         refs = [
@@ -314,12 +320,13 @@ class FSDP2WeightUpdater:
         return refs
 
     def _separated_model_update(self):
+        backend = get_backend()
         logger.info(f"start broadcast model update {self.model_update_group_name}")
         for named_weights in gather_fsdp2_weights(
             self.model, buffer_size=self._model_update_buffer_size, is_lora=self.is_lora
         ):
             refs = self._broadcast_to_infer_workers(named_weights)
-            ray.get(refs)
+        backend.get(refs)
         self._add_lora_to_infer_workers()
         torch.cuda.empty_cache()
         return {}
@@ -328,6 +335,7 @@ class FSDP2WeightUpdater:
         if dist.get_rank() != 0 or not self.is_lora:
             return
         peft_config = self.model.peft_config.get("default", None)
-        ray.get(
+        backend = get_backend()
+        backend.get(
             [worker.add_lora.remote(peft_config=asdict(peft_config)) for worker in self.model_update_infer_workers]
         )

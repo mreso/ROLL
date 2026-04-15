@@ -1,3 +1,5 @@
+# NOTE: This file contains Ray-specific utilities for vLLM integration
+# When using Monarch backend, this functionality may need adaptation
 import asyncio
 import os
 from typing import Optional, List

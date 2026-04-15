@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union, Set
 
 import numpy as np
-import ray
+from roll.distributed.backend.types import RemoteRef
 import tensordict
 import torch
 from tensordict import TensorDict
@@ -22,6 +22,27 @@ from roll.platforms import current_platform
 from roll.utils.logging import get_logger
 
 logger = get_logger()
+
+
+def _get_objects(refs, timeout=None):
+    """
+    Helper function to fetch objects using the appropriate backend.
+    Handles both RemoteRef (backend abstraction) and raw Ray ObjectRef.
+    """
+    if not refs:
+        return []
+
+    # Check if we're using backend abstraction
+    if hasattr(refs[0] if isinstance(refs, list) else refs, '_inner'):
+        # Using RemoteRef from backend abstraction
+        from roll.distributed.backend import get_backend
+        backend = get_backend()
+        return backend.get(refs, timeout=timeout)
+    else:
+        # Fallback to raw Ray for backwards compatibility
+        import ray
+        return ray.get(refs, timeout=timeout)
+
 
 try:
     tensordict.set_lazy_legacy(False).set()
@@ -815,18 +836,18 @@ class DataProto:
 
     @staticmethod
     def materialize_concat(
-            data_refs: Union[List[ray.ObjectRef], ray.ObjectRef, List["ObjectRefWrap"]],
+            data_refs: Union[List[RemoteRef], RemoteRef, List["ObjectRefWrap"]],
             *,
             global_keys: Optional[Set[str]] = None,
     ) -> "DataProto":
         """
-        Fetch a collection of DataProto objects from Ray ObjectRef(s) and concatenate
+        Fetch a collection of DataProto objects from RemoteRef(s) and concatenate
         them into a single DataProto instance.
 
         Parameters
         ----------
-        data_refs : Union[List[ray.ObjectRef], ray.ObjectRef, List[ObjectRefWrap]]
-            Ray object references (or ObjectRefWrap) pointing to DataProto objects.
+        data_refs : Union[List[RemoteRef], RemoteRef, List[ObjectRefWrap]]
+            Remote references (or ObjectRefWrap) pointing to DataProto objects.
         global_keys : Optional[Set[str]], optional
             Keys in ``meta_info`` that should be aggregated across all ranks when
             concatenating.  If None, only rank-0 values are kept for all keys.
@@ -844,20 +865,20 @@ class DataProto:
         if "roll_RPC_TIMEOUT" in os.environ:
             timeout = int(os.environ["roll_RPC_TIMEOUT"])
 
-        # Fetch objects from Ray
+        # Fetch objects using backend abstraction
         if isinstance(data_refs[0], ObjectRefWrap):
             data_refs: List[ObjectRefWrap]
             obj_refs = [ref.obj_ref for ref in data_refs]
-            fetched = ray.get(obj_refs, timeout=timeout)
+            fetched = _get_objects(obj_refs, timeout=timeout)
             data = [fetched[i] for i, ref in enumerate(data_refs) if ref.collected]
         else:
-            data: List["DataProto"] = ray.get(data_refs, timeout=timeout)
+            data: List["DataProto"] = _get_objects(data_refs, timeout=timeout)
 
         # Concatenate and apply global aggregation rules
         return DataProto.concat(data, global_keys=global_keys)
 
 
 class ObjectRefWrap:
-    def __init__(self, obj_ref: ray.ObjectRef, collected=False):
+    def __init__(self, obj_ref: RemoteRef, collected=False):
         self.obj_ref = obj_ref
         self.collected = collected

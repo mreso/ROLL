@@ -10,10 +10,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Union
 
+from roll.distributed.backend import get_backend
+from roll.distributed.backend.types import RemoteRef
 import ray
 import torch
 from datasets import Dataset
-from ray import ObjectRef
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from transformers import set_seed
@@ -313,7 +314,6 @@ class ReplayBuffer:
         return group.pop_prompt_id(prompt_id)
 
 
-@ray.remote(concurrency_groups={"single_thread": 1, "multi_thread": 256})
 class AsyncDynamicSamplingScheduler:
     def __init__(self, pipeline_config=None):
         self.pipeline_config = pipeline_config
@@ -402,11 +402,13 @@ class AsyncDynamicSamplingScheduler:
             logger.info("use_additional_prompts is False, disable query and response filtering.")
 
         self.cluster_max_running_requests = self.pipeline_config.max_running_requests * self.actor_cluster.dp_size
-        self.request_counter = GlobalCounter.options(
+        backend = get_backend()
+        self.request_counter = backend.create_actor(
+            cls=GlobalCounter,
             name="DynamicSchedulerRequestCounter",
             get_if_exists=True,
-            namespace=RAY_NAMESPACE,
-        ).remote()
+            namespace=RAY_NAMESPACE
+        )
 
     def reset_status(self):
         self.exception_queue = queue.Queue()
@@ -432,7 +434,8 @@ class AsyncDynamicSamplingScheduler:
             req_item.data.meta_info["response_callback_fn"] = self.response_callback_fn
             req_item.data.meta_info["request_id"] = f"{req_item.request_id}_{self.global_step}"
             refs.append(
-                self.actor_cluster.workers[dp_rank].add_request.remote(
+                get_backend().invoke(
+                    self.actor_cluster.workers[dp_rank], "add_request",
                     command=GenerateRequestType.ADD, data=req_item.data
                 )
             )
@@ -459,7 +462,7 @@ class AsyncDynamicSamplingScheduler:
         request_data_list = self.expand_requests(request_data)
         req_items: list[ExperienceItem] = []
         for req in request_data_list:
-            request_id = ray.get(self.request_counter.get_value.remote())
+            request_id = get_backend().get(get_backend().invoke(self.request_counter, "get_value"))
             req.meta_info["prompt_id"] = prompt_id
             request_item = ExperienceItem(
                 request_id=f"{request_id}",
@@ -569,8 +572,8 @@ class AsyncDynamicSamplingScheduler:
 
         stop_refs = []
         for infer_worker in self.actor_cluster.workers:
-            stop_refs.append(infer_worker.add_request.remote(command=GenerateRequestType.STOP, data=None))
-        ray.get(stop_refs)
+            stop_refs.append(get_backend().invoke(infer_worker, "add_request", command=GenerateRequestType.STOP, data=None))
+        get_backend().get(stop_refs)
         logger.info("async sampling paused, waiting for all requests to be collected...")
         start_time = time.time()
         timeout = 120
@@ -590,7 +593,7 @@ class AsyncDynamicSamplingScheduler:
         if self.is_val:
             for i in range(self.batch_size):
                 all_refs.extend(self.send_next_data_item(data))
-            ray.get(all_refs)
+            get_backend().get(all_refs)
             logger.info(f"async validation send {self.batch_size} prompts.")
             return
 
@@ -616,7 +619,7 @@ class AsyncDynamicSamplingScheduler:
                 continue
             all_refs.extend(self.send_next_data_item(data))
             send_prompt_num += 1
-        ray.get(all_refs)
+        get_backend().get(all_refs)
         logger.info(f"async sending thread send {send_prompt_num} prompts.")
 
     def start_sampling(self, data: DataProto, batch_size: int):
@@ -654,7 +657,7 @@ class AsyncDynamicSamplingScheduler:
                 reward_worker = next(self.reward_worker_iters[experience_item.domain])
 
             # call reward
-            rewards: DataProto = ray.get(reward_worker.compute_rewards.remote(batch))
+            rewards: DataProto = get_backend().get(get_backend().invoke(reward_worker, "compute_rewards", batch))
             batch.union(rewards)
 
             with self.lock:
@@ -708,11 +711,12 @@ class AsyncDynamicSamplingScheduler:
             if dp_rank is None:
                 continue
             abort_refs.append(
-                self.actor_cluster.workers[dp_rank].add_request.remote(
+                get_backend().invoke(
+                    self.actor_cluster.workers[dp_rank], "add_request",
                     command=GenerateRequestType.ABORT, data=DataProto(meta_info={"request_id": item.request_id})
                 )
             )
-        ray.get(abort_refs)
+        get_backend().get(abort_refs)
 
     def postprocess_paused_data(self, data: DataProto) -> DataProto:
         pre_data = self.replay_buffer.get_item(data.meta_info["request_id"]).data

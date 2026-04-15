@@ -10,10 +10,10 @@ from functools import wraps, partial
 from itertools import chain
 from typing import Tuple, List, Dict
 from more_itertools import chunked
-import ray
 import torch
 import asyncio
 
+from roll.distributed.backend.types import RemoteRef
 from roll.distributed.scheduler.protocol import DataProto, ObjectRefWrap
 from roll.utils.logging import get_logger
 from roll.platforms import current_platform
@@ -87,7 +87,7 @@ def collect_all_to_one(cluster, output):
     """
     assert len(output) == cluster.world_size
 
-    if isinstance(output[0], ray.ObjectRef):
+    if isinstance(output[0], RemoteRef):
         output_in_dp = []
         for global_rank in range(cluster.world_size):
             output_in_dp.append(ObjectRefWrap(output[global_rank], collected=global_rank == 0))
@@ -165,7 +165,7 @@ def collect_dp_mp_compute(cluster, output):
         return list(chain.from_iterable(output_in_dp))
     elif isinstance(output[0], DataProto):
         return DataProto.concat(output_in_dp)
-    elif isinstance(output[0], ray.ObjectRef):
+    elif isinstance(output[0], RemoteRef):
         # 处理block=False情况下，dp内的可能完成时间不一致问题
         output_in_dp = []
         for global_rank in range(cluster.world_size):
@@ -240,7 +240,12 @@ def func_generator(cls, method_name, dispatch_fn, collect_fn, execute_fn):
             timeout = None
             if "roll_RPC_TIMEOUT" in os.environ:
                 timeout = int(os.environ.get("roll_RPC_TIMEOUT"))
-            output = ray.get(output, timeout=timeout)
+            # Use backend abstraction if available, otherwise fall back to ray.get
+            if hasattr(cls, 'backend'):
+                output = cls.backend.get(output, timeout=timeout)
+            else:
+                import ray
+                output = ray.get(output, timeout=timeout)
         output = collect_fn(cls, output)
         return output
 

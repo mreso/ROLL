@@ -5,8 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from ray._private import profiling
+from roll.distributed.backend import get_backend
 from tqdm import tqdm
 
 from roll.distributed.executor.cluster import Cluster
@@ -353,7 +352,6 @@ class GroupQueue:
             self.complete.clear()
             await self.complete.wait()
 
-@ray.remote
 class GroupQueueManager:
     def __init__(self, config, env_manager_config: EnvManagerConfig, mode):
         self.mode = mode
@@ -547,13 +545,13 @@ class RolloutScheduler(RolloutMockMixin):
         train_rollout_scheduler = RolloutScheduler(actor_infer)
         val_rollout_scheduler = RolloutScheduler(actor_infer)
         while True:
-            ray.get(train_rollout_scheduler.suspend.remote())
+            get_backend().get(train_rollout_scheduler.suspend.remote())
             model_update()
             if val:
-                ray.get(val_rollout_scheduler.get_batch.remote())
-            ray.get(train_rollout_scheduler.get_batch.remote())
+                get_backend().get(val_rollout_scheduler.get_batch.remote())
+            get_backend().get(train_rollout_scheduler.get_batch.remote())
             rollout()
-        ray.get(train_rollout_scheduler.shutdown.remote())
+        get_backend().get(train_rollout_scheduler.shutdown.remote())
     """
     def __init__(self, config, env_manager_config: EnvManagerConfig, resource_manager, infer_cluster, mode, collator=None):
         self.config = config
@@ -565,26 +563,29 @@ class RolloutScheduler(RolloutMockMixin):
 
         env_num = self.env_manager_config.world_size * self.env_manager_config.max_env_num_per_worker
 
-        self.env_output_queue = GroupQueueManager.options(
+        backend = get_backend()
+        from roll.distributed.backend.types import PlacementSpec
+        placement_spec = PlacementSpec(node_id=ray.get_runtime_context().get_node_id())
+
+        self.env_output_queue = backend.create_actor(
+            cls=GroupQueueManager,
             name=f"GroupQueueManager-{mode}",
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
-                node_id=ray.get_runtime_context().get_node_id(),
-                soft=False),
-            max_concurrency = env_num + 1 # reserve extra one for get_batch
-        ).remote(
-            self.config,
-            self.env_manager_config,
-            mode
+            placement=placement_spec,
+            max_concurrency=env_num + 1,  # reserve extra one for get_batch
+            args=(self.config, self.env_manager_config, mode)
         )
 
-        self.router_manager = ray.remote(RouterManager).options(
-                name=f"RouterManager-{self.env_manager_config.name}-{mode}",
-                scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=ray.get_runtime_context().get_node_id(),
-                    soft=False,
-                ),
-                max_concurrency = env_num + 1 # reserve extra one for suspend/resume
-            ).remote(actor_cluster=self.infer_cluster, router_args=config.router_args, num_gpus_per_node=config.num_gpus_per_node)
+        self.router_manager = backend.create_actor(
+            cls=RouterManager,
+            name=f"RouterManager-{self.env_manager_config.name}-{mode}",
+            placement=placement_spec,
+            max_concurrency=env_num + 1,  # reserve extra one for suspend/resume
+            args=(self.infer_cluster,),
+            kwargs={
+                "router_args": config.router_args,
+                "num_gpus_per_node": config.num_gpus_per_node
+            }
+        )
 
         self.es_manager: Any = Cluster(
             name=self.env_manager_config.name,
