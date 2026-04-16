@@ -1,0 +1,4 @@
+{"tag": "benchmark", "id": "eval_001", "messages": [{"role": "user", "content": "What is 25 × 16?"}, {"role": "assistant", "content": "25 × 16 = 400"}]}
+{"tag": "benchmark", "id": "eval_002", "messages": [{"role": "user", "content": "Solve for y: 5y - 3 = 22"}, {"role": "assistant", "content": "5y - 3 = 22\n5y = 25\ny = 5"}]}
+{"tag": "benchmark", "id": "eval_003", "messages": [{"role": "user", "content": "What is the square root of 64?"}, {"role": "assistant", "content": "The square root of 64 is 8"}]}
+{"tag": "benchmark", "id": "eval_004", "messages": [{"role": "user", "content": "What is 20% of 150?"}, {"role": "assistant", "content": "20% of 150 = 0.2 × 150 = 30"}]}

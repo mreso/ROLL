@@ -1,0 +1,141 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "qwen2.5-0.5B-rlvr-training-run"
+seed: 42
+logging_dir: ./output/logs
+output_dir: ./output
+system_envs:
+  USE_MODELSCOPE: '0'
+  NCCL_BLOCKING_WAIT: '1'
+  NCCL_ASYNC_ERROR_HANDLING: '1'
+  NCCL_TIMEOUT: '1800'
+  NCCL_IB_DISABLE: '1'
+  NCCL_SOCKET_IFNAME: 'eth0'
+  GLOO_SOCKET_IFNAME: 'eth0'
+  VLLM_USE_V1: '0'
+
+checkpoint_config:
+  type: file_system
+  output_dir: ./output/checkpoints
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ./output/tensorboard
+
+num_gpus_per_node: 4
+
+max_steps: 3
+save_steps: 50
+logging_steps: 1
+eval_steps: 200
+resume_from_checkpoint: false
+
+rollout_batch_size: 16
+prompt_length: 256
+response_length: 256
+
+num_return_sequences_in_group: 4
+ppo_epochs: 1
+adv_estimator: "grpo"
+
+reward_clip: 5
+advantage_clip: 1.0
+
+norm_mean_type: ~
+norm_std_type: ~
+
+max_len_mask: false
+difficulty_mask: false
+difficulty_loss_weight: false
+length_loss_weight: false
+add_token_level_kl: false
+whiten_advantages: true
+
+global_template: qwen2_5
+
+pretrain: /home/dev/.cache/modelscope/hub/models/Qwen/Qwen2___5-0___5B-Instruct
+reward_pretrain: /home/dev/.cache/modelscope/hub/models/Qwen/Qwen2___5-0___5B-Instruct
+
+actor_train:
+  model_args:
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: ~
+  training_args:
+    learning_rate: 5.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 8
+    warmup_steps: 5
+    num_train_epochs: 1
+  data_args:
+    template: qwen2_5
+    file_name:
+      - data/math_training_400.jsonl
+    domain_interleave_probs:
+      math_rule: 1.0
+    dataset_dir: data
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 4
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config:
+      train_micro_batch_size_per_gpu: auto
+      bf16:
+        enabled: true
+      zero_optimization:
+        stage: 2
+  device_mapping: list(range(0,2))
+  infer_batch_size: 1
+
+actor_infer:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.95
+    top_k: 50
+    num_beams: 1
+    temperature: 0.7
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.85
+      block_size: 16
+      max_model_len: 1024
+      load_format: auto
+      enforce_eager: true
+  device_mapping: list(range(2,3))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,2))
+  infer_batch_size: 2
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [math_rule]
+    world_size: 4
+    infer_batch_size: 1
