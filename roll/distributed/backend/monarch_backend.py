@@ -54,6 +54,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _unwrap_value_mesh(value_mesh: Any) -> Any:
+    """Unwrap a Monarch ``ValueMesh`` to a plain Python value."""
+    if hasattr(value_mesh, "item"):
+        try:
+            return value_mesh.item()
+        except Exception:
+            pass
+    if hasattr(value_mesh, "values"):
+        try:
+            values = list(value_mesh.values())
+            return values[0] if len(values) == 1 else values
+        except Exception:
+            pass
+    return value_mesh
+
+
 class _MonarchActorRef:
     """Holds the Monarch actor mesh and proc mesh for a single logical actor."""
 
@@ -119,19 +135,13 @@ class _MonarchFutureRef:
         """Support ``await RemoteRef(inner=_MonarchFutureRef(...))``."""
 
         async def _resolve():
-            value_mesh = self.future.get()
-            if hasattr(value_mesh, "item"):
-                try:
-                    return value_mesh.item()
-                except Exception:
-                    pass
-            if hasattr(value_mesh, "values"):
-                try:
-                    values = list(value_mesh.values())
-                    return values[0] if len(values) == 1 else values
-                except Exception:
-                    pass
-            return value_mesh
+            # Use Monarch Future's native __await__ (non-blocking) instead
+            # of the blocking future.get().  This is critical for the
+            # DynamicSamplingScheduler: its async event loop dispatches
+            # multiple concurrent generate requests.  Blocking get() would
+            # serialize them, preventing vLLM continuous batching.
+            value_mesh = await self.future
+            return _unwrap_value_mesh(value_mesh)
 
         return _resolve().__await__()
 
@@ -772,21 +782,7 @@ class MonarchBackend(Backend):
             # Re-raise with a friendlier message.
             raise
 
-        # Unwrap ValueMesh -> plain Python object.
-        if hasattr(value_mesh, "item"):
-            try:
-                return value_mesh.item()
-            except Exception:
-                pass
-        if hasattr(value_mesh, "values"):
-            try:
-                values = value_mesh.values()
-                if len(values) == 1:
-                    return values[0]
-                return values
-            except Exception:
-                pass
-        return value_mesh
+        return _unwrap_value_mesh(value_mesh)
 
     # ==================================================================
     # Object Store
